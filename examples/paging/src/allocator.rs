@@ -1,32 +1,38 @@
-//! The kernel heap: the [`GlobalAlloc`] interface, a dummy allocator that shows
-//! its shape, and the `linked_list_allocator`-backed heap the kernel actually
-//! uses.
+//! The kernel heap and the three allocator designs that hand it out.
 //!
-//! This is `blog_os` post-10 (*Heap Allocation*), done properly. The post builds
-//! a heap in three steps, and all three live here:
+//! This is a forward hook into a paging crate (post-08 + post-09): it carries
+//! post-10's heap *interface* and post-11's allocator *designs* forward, so the
+//! later examples' code runs here too. Post-10 built the heap *interface* — a
+//! `#[global_allocator]` and a mapped region — and left the implementation to the
+//! `linked_list_allocator` crate. Post-11 replaces that implementation with three
+//! designs written from scratch, each a [`GlobalAlloc`] in its own module:
 //!
-//! 1. **The interface.** Rust's `alloc` crate needs a `#[global_allocator]` that
-//!    implements [`GlobalAlloc`]. [`Dummy`] is the post's first step: it compiles
-//!    and returns null for every allocation, which is enough to make the "no
-//!    global allocator" error go away while the real one is built.
-//! 2. **The region.** A heap is a run of virtual pages backed by physical frames.
-//!    [`init_heap`] maps [`HEAP_SIZE`] bytes at [`HEAP_START`] with the mapper and
-//!    frame allocator the paging layer provides, then hands the region to the
-//!    allocator.
-//! 3. **The allocator.** [`ALLOCATOR`] is a
-//!    [`LockedHeap`](linked_list_allocator::LockedHeap) — a linked-list allocator
-//!    behind a spin lock — the same crate the real kernel in
-//!    [`kernel/`](../../kernel) uses.
+//! - [`bump`]: a linear "bump" pointer. The fastest design, but it can only reuse
+//!   memory once *every* allocation has been freed, so a single long-lived
+//!   allocation starves it.
+//! - [`linked_list`]: a free list threaded through the freed blocks themselves, so
+//!   any freed region can be reused immediately. Allocation is a linear scan and
+//!   the list can fragment, but no memory is ever stranded.
+//! - [`fixed_size_block`]: one free list per size class, with a
+//!   [`linked_list_allocator`] fallback for large allocations. Fast allocation and
+//!   deallocation for the common sizes; the design the post settles on, and the one
+//!   installed below.
 //!
-//! The tutorial passes its mapper and frame allocator around by hand; here the
-//! paging layer already stores them behind locks ([`crate::memory`]), so
-//! [`init`] is the convenience wrapper `kernel_main` and the tests call, while
-//! [`init_heap`] keeps the post's exact signature for contrast.
+//! [`init_heap`] is post-10's function, kept with its exact signature: it maps
+//! [`HEAP_SIZE`] bytes at [`HEAP_START`] through the paging layer and then hands
+//! the region to whichever design is installed. [`init`] is the wrapper that
+//! supplies the paging layer's stored mapper and frame allocator, and [`Dummy`] is
+//! post-10's first step, kept here so the diff against the tutorial reads as "the
+//! same code, wired into this repository".
+
+pub mod bump;
+pub mod fixed_size_block;
+pub mod linked_list;
 
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 
-use linked_list_allocator::LockedHeap;
+use fixed_size_block::FixedSizeBlockAllocator;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
@@ -43,19 +49,19 @@ pub const HEAP_START: usize = 0x_4444_4444_0000;
 /// The size of the kernel heap: 100 KiB.
 pub const HEAP_SIZE: usize = 100 * 1024;
 
-/// The kernel's global allocator, empty until [`init_heap`] (or [`init`]) runs.
+/// The kernel's global allocator: post-11's fixed-size block design.
 ///
-/// `LockedHeap` is a linked-list allocator behind a spin lock, so it is usable
-/// from any context that can take the lock — including an interrupt handler.
+/// [`Locked`] puts the allocator behind a spin lock, so it is usable from any
+/// context that can take the lock — including an interrupt handler. The design is
+/// `const`-constructible, which is what lets it initialize a `static`.
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
 
 /// A `GlobalAlloc` that always fails.
 ///
-/// This is the post's first step, kept here so the diff against the tutorial
-/// reads as "the same code, wired into this repository": it shows what a global
-/// allocator has to provide (an `alloc` and a `dealloc`) before any real
-/// bookkeeping exists. It is never installed.
+/// This is post-10's first step, kept here so the heap *interface* is visible
+/// before any real bookkeeping exists: it shows what a global allocator has to
+/// provide (an `alloc` and a `dealloc`) and nothing more. It is never installed.
 pub struct Dummy;
 
 // SAFETY: the trait requires `alloc` to return either a valid pointer or null,
@@ -75,9 +81,12 @@ unsafe impl GlobalAlloc for Dummy {
 /// Maps [`HEAP_SIZE`] bytes at [`HEAP_START`] and hands the region to the global
 /// allocator.
 ///
-/// This is the post's function, kept with its exact signature: it takes the
-/// mapper and frame allocator explicitly so the two are visible in the call.
-/// [`init`] is the wrapper that supplies the paging layer's stored ones.
+/// This is post-10's function, kept with its exact signature: it takes the mapper
+/// and frame allocator explicitly so the two are visible in the call. [`init`] is
+/// the wrapper that supplies the paging layer's stored ones.
+///
+/// Every allocator design provides the same `init(heap_start, heap_size)`
+/// interface, so this function does not change when the installed design does.
 ///
 /// # Errors
 ///
@@ -110,7 +119,7 @@ pub fn init_heap(
     // SAFETY: the whole heap region is now mapped and writable, and this is the
     // only place the global allocator is initialized.
     unsafe {
-        ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
+        ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE);
     }
 
     Ok(())
@@ -142,5 +151,55 @@ pub fn init() -> Result<(), &'static str> {
             Err("a page-table entry is a huge page")
         }
         Some(Some(Err(MapToError::PageAlreadyMapped(_)))) => Err("a heap page is already mapped"),
+    }
+}
+
+/// A wrapper around [`spin::Mutex`] that lets a [`GlobalAlloc`] be implemented on
+/// a `static`.
+///
+/// Rust's orphan rules forbid implementing a foreign trait (`GlobalAlloc`) for a
+/// foreign type (`spin::Mutex`), so each design is implemented for
+/// `Locked<Design>` instead: the wrapper is local, and the lock is what makes the
+/// allocator usable from an interrupt handler.
+pub struct Locked<A> {
+    inner: spin::Mutex<A>,
+}
+
+impl<A> Locked<A> {
+    /// Wraps `inner` in a spin lock, without locking it.
+    pub const fn new(inner: A) -> Self {
+        Locked {
+            inner: spin::Mutex::new(inner),
+        }
+    }
+
+    /// Locks the wrapper and returns a guard to the allocator inside.
+    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
+        self.inner.lock()
+    }
+}
+
+/// Rounds the address `addr` up to the next multiple of `align`.
+///
+/// `align` must be a power of two, which the [`GlobalAlloc`] trait guarantees:
+/// the [`Layout`] it passes always carries a power-of-two alignment. That makes
+/// the rounding a single add, mask and negate.
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
+
+// The pure helper above is the one piece of the allocator that does not need a
+// heap to test.
+#[cfg(test)]
+mod tests {
+    use super::align_up;
+
+    #[test_case]
+    fn align_up_rounds_up_to_the_alignment() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(8, 8), 8, "an aligned address must not move");
+        assert_eq!(align_up(9, 8), 16);
+        assert_eq!(align_up(0x1234, 0x1000), 0x2000);
     }
 }

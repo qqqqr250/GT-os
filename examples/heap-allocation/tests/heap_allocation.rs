@@ -104,3 +104,17 @@ fn many_boxes() {
         assert_eq!(*x, i);
     }
 }
+
+#[test_case]
+fn many_boxes_long_lived() {
+    // The test that separates the allocator designs. One allocation stays live
+    // for the whole loop, so a bump allocator's counter never returns to zero and
+    // it exhausts the heap; the linked-list and fixed-size block allocators reuse
+    // every freed block and serve the whole loop from a 100 KiB heap.
+    let long_lived = Box::new(1);
+    for i in 0..allocator::HEAP_SIZE {
+        let x = Box::new(i);
+        assert_eq!(*x, i);
+    }
+    assert_eq!(*long_lived, 1);
+}

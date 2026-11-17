@@ -34,6 +34,7 @@
 
 extern crate alloc;
 
+mod allocator;
 mod ata;
 mod audio;
 mod browser;
@@ -539,6 +540,15 @@ pub mod testing {
     #[must_use]
     pub fn heap_info() -> (u64, u64) {
         crate::memory::info()
+    }
+
+    /// The allocator design the kernel installs as its global allocator.
+    ///
+    /// This is post-11's fixed-size block design (see [`crate::allocator`]), the
+    /// one the post settles on.
+    #[must_use]
+    pub fn allocator_design() -> &'static str {
+        crate::memory::ALLOCATOR_DESIGN
     }
 
     /// Translates `address` by walking the four-level table by hand.

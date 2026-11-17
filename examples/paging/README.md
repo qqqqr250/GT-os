@@ -14,10 +14,12 @@ It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),
 [`examples/cpu-exceptions`](../cpu-exceptions/README.md) (post-05),
 [`examples/double-faults`](../double-faults/README.md) (post-06),
 [`examples/hardware-interrupts`](../hardware-interrupts/README.md) (post-07) and
-[`examples/heap-allocation`](../heap-allocation/README.md) (post-10). It reuses
+[`examples/heap-allocation`](../heap-allocation/README.md) (post-10) and
+[`examples/allocator-designs`](../allocator-designs/README.md) (post-11). It reuses
 post-04's in-QEMU test framework, post-05's exception handling, post-06's
 GDT/TSS/IST and post-07's PIC/PIT/keyboard, and adds the paging layer; as a
-forward-looking hook it also carries post-10's heap.
+forward-looking hook it also carries post-10's heap interface and post-11's
+allocator designs.
 
 ## What post-08 does
 
@@ -64,7 +66,10 @@ Cargo.toml                  standalone package (its own workspace)
 src/lib.rs                  print! macros, the post-04 test framework, kernel_main, unit tests
 src/main.rs                 the bootable binary: bootloader config + entry_point!
 src/memory.rs               the paging API: CR3, the table walk, the mapper and the frame allocators
-src/allocator.rs            the post-10 heap hook: the heap region, Dummy and the LockedHeap global allocator
+src/allocator.rs            the post-10/11 heap hook: the heap region, Dummy, Locked and the installed fixed-size block allocator
+src/allocator/bump.rs       the bump allocator design
+src/allocator/linked_list.rs  the linked-list (free-list) allocator design
+src/allocator/fixed_size_block.rs  the fixed-size block allocator design
 src/gdt.rs                  the GDT, the TSS and the interrupt stack table (post-06)
 src/interrupts.rs           the IDT, the PIC/PIT setup, the timer/keyboard/exception handlers
 src/pic.rs                  the hand-rolled 8259 PIC: remap, mask, EOI
@@ -73,7 +78,7 @@ src/keyboard.rs             a scancode-set-1 decoder and the input queue
 src/serial.rs               a minimal COM1 UART driver, with the `without_interrupts` fix
 src/port.rs                 x86 port I/O, used by the UART, the PIC/PIT and exit_qemu
 tests/paging.rs             in-QEMU tests for the window, the walk and the mapping
-tests/heap_allocation.rs    in-QEMU tests for the post-10 heap hook
+tests/heap_allocation.rs    in-QEMU tests for the post-10/11 heap hook
 ```
 
 ## Test, build and run
@@ -96,12 +101,12 @@ powershell -ExecutionPolicy Bypass -File scripts\paging.ps1 -Test
 ```
 
 Three test binaries run — the library's unit tests, `tests/paging.rs` and
-`tests/heap_allocation.rs` (the post-10 heap hook, which allocates a `Box` and
-grows a `Vec`) — and QEMU reports success as exit code 33 (the framework writes
-`0x10`, which QEMU reports as `(0x10 << 1) | 1`). The tests cover the
-physical-memory window, the `CR3` frame, the hand-written walk against the mapper,
-an unmapped page, the `EmptyFrameAllocator` failure, a real mapping read back, and
-the post-07 timer.
+`tests/heap_allocation.rs` (the post-10/11 heap hook, which allocates a `Box`,
+grows a `Vec` and runs `many_boxes_long_lived`) — and QEMU reports success as exit
+code 33 (the framework writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`). The
+tests cover the physical-memory window, the `CR3` frame, the hand-written walk
+against the mapper, an unmapped page, the `EmptyFrameAllocator` failure, a real
+mapping read back, the post-07 timer, and the allocator designs' own unit tests.
 
 Build the bootable kernel and boot it (BIOS, via the shared `runner`):
 
@@ -122,10 +127,12 @@ the frame allocator comes from the bootloader's memory map. Userspace is a later
 post; the real kernel in [`kernel/`](../../kernel) already has it.
 
 As a forward-looking hook, [`allocator`](src/allocator.rs) also brings forward
-post-10's heap: it maps a `linked_list_allocator` heap through the paging layer and
-installs a `#[global_allocator]`, so `Box`, `Vec` and `Rc` work. It is exercised
-through the crate's public API by `tests/heap_allocation.rs`. The full post-10
-treatment is [`examples/heap-allocation`](../heap-allocation/README.md).
+post-10's heap *interface* and post-11's allocator *designs*: it maps a heap
+through the paging layer and installs a `#[global_allocator]`, so `Box`, `Vec` and
+`Rc` work, and it implements the allocator with the three designs post-11 builds —
+a bump, a linked-list and a fixed-size block allocator — installing the last. It
+is exercised through the crate's public API by `tests/heap_allocation.rs`. The full
+treatment is [`examples/allocator-designs`](../allocator-designs/README.md).
 
 > **Why the console is COM1.** Post-08's kernel prints to the VGA text buffer;
 > this crate's console is COM1, because that is the only console a headless

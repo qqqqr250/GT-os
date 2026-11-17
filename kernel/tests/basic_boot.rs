@@ -276,8 +276,9 @@ fn test_the_kernel_heap_is_initialized() {
 #[test_case]
 fn test_heap_allocations_round_trip() {
     // post-10: a `Box` and a growing `Vec` must survive the global allocator. The
-    // kernel's heap is a linked-list allocator over the physical-memory window, so
-    // a heap pointer lands inside the window `heap_info` reports.
+    // kernel's heap is post-11's fixed-size block allocator over the
+    // physical-memory window, so a heap pointer lands inside the window
+    // `heap_info` reports.
     let (start, size) = kernel::testing::heap_info();
     let value = alloc::boxed::Box::new(0x1234_5678_u32);
     assert_eq!(*value, 0x1234_5678);
@@ -291,4 +292,26 @@ fn test_heap_allocations_round_trip() {
     }
     assert_eq!(vec.len(), 1000);
     assert_eq!(vec.iter().sum::<u64>(), 999 * 1000 / 2);
+}
+
+#[test_case]
+fn test_the_installed_allocator_is_the_fixed_size_block_design() {
+    // post-11: the kernel installs the design the post settles on.
+    assert_eq!(kernel::testing::allocator_design(), "fixed-size block");
+}
+
+#[test_case]
+fn test_a_long_lived_allocation_does_not_starve_the_heap() {
+    // post-11: the fixed-size block allocator returns each freed block to its
+    // size class's free list, so an allocation that stays live for the whole loop
+    // does not stop the rest of the heap from being reused. A bump allocator
+    // would hand out a fresh block every iteration and run the heap dry; the
+    // design's own unit tests pin that starving behaviour down on a small scratch
+    // region.
+    let long_lived = alloc::boxed::Box::new(0xabcd_1234_u64);
+    for i in 0..100_000_u64 {
+        let x = alloc::boxed::Box::new(i);
+        assert_eq!(*x, i);
+    }
+    assert_eq!(*long_lived, 0xabcd_1234);
 }

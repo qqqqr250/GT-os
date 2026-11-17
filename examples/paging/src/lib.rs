@@ -27,10 +27,12 @@
 //! - [`memory`] adds the paging API: [`memory::active_level_4_frame`] (post-08),
 //!   a hand-written [`memory::translate_addr`] walk, and the real
 //!   [`memory::init_paging`] / [`memory::map_page`] path (post-09),
-//! - as a forward-looking hook, [`allocator`] brings forward post-10: it maps a
-//!   `linked_list_allocator` heap through the paging layer and installs a
-//!   `#[global_allocator]`, so `Box`, `Vec` and `Rc` work. The full post-10
-//!   treatment lives in `examples/heap-allocation`.
+//! - as a forward-looking hook, [`allocator`] brings forward post-10 and post-11:
+//!   it maps a heap through the paging layer and installs a `#[global_allocator]`,
+//!   so `Box`, `Vec` and `Rc` work, and it implements the allocator with the three
+//!   designs post-11 builds ([`allocator::bump`], [`allocator::linked_list`],
+//!   [`allocator::fixed_size_block`]), installing the last. The full treatment
+//!   lives in `examples/allocator-designs`.
 //!
 //! Everything runs on COM1: post-08's own output goes to the VGA text buffer,
 //! which a headless `cargo test` cannot read. See the crate `README.md`.
@@ -61,8 +63,8 @@
     clippy::cast_sign_loss
 )]
 
-// The heap is what the post-10 hook is about: `alloc` provides `Box`, `Vec`, `Rc`
-// and the `GlobalAlloc` trait the [`allocator`] module implements.
+// The heap is what the post-10/11 hook is about: `alloc` provides `Box`, `Vec`,
+// `Rc` and the `GlobalAlloc` trait the [`allocator`] module's designs implement.
 extern crate alloc;
 
 pub mod allocator;

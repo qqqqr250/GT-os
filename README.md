@@ -26,10 +26,11 @@ interactive shell over the PS/2 keyboard or a serial line.
   reports no linear framebuffer, the console falls back to the legacy VGA text
   buffer at `0xb8000`, with all sixteen text colours, a hardware cursor and the
   same scrolling/wrapping logic (see [Console fallback](#console-fallback)).
-- **Heap** – `linked_list_allocator` over the top of the largest usable region,
+- **Heap** – a fixed-size block allocator (a free list per size class with a
+  `linked_list_allocator` fallback) over the top of the largest usable region,
   capped at 32 MiB, reached through the bootloader's physical-memory window
-  (post-10: the heap and its `#[global_allocator]` are exercised in-QEMU by
-  `basic_boot`).
+  (post-10 builds the heap and its `#[global_allocator]`; post-11 supplies the
+  allocator's own design, and both are exercised in-QEMU by `basic_boot`).
 - **Paging** – the kernel owns its page tables: `memory` reads `CR3`, walks the
   four-level table both by hand and through an `OffsetPageTable`, and can map a
   page from a frame allocator over the bootloader's memory map. `usermode` builds
@@ -392,7 +393,11 @@ kernel\
   src\vga.rs             legacy VGA text-mode console fallback (0xb8000)
   src\volatile.rs        Volatile<T>: the one place raw device pointers are read/written
   src\font.rs            generated 8x8 bitmap font
-  src\memory.rs          heap selection, global allocator and the paging layer (post-08)
+  src\memory.rs          heap selection, the global allocator and the paging layer (post-08, post-10/11)
+  src\allocator.rs       the Locked wrapper and the allocator designs module (post-11)
+  src\allocator\bump.rs   the bump allocator design
+  src\allocator\linked_list.rs  the linked-list (free-list) allocator design
+  src\allocator\fixed_size_block.rs  the fixed-size block allocator design (the one installed)
   src\interrupts.rs      IDT, PIC remap, PIT, IRQ handlers, exception reports
   src\input.rs           lock-free input ring buffer
   src\keyboard.rs        PS/2 scancode set 1 → ASCII
@@ -435,6 +440,9 @@ examples\
   heap-allocation\       standalone `blog_os` post-10 crate: the heap region, the
                          `#[global_allocator]` and `Box`/`Vec`/`Rc`, always
                          `no_std` (not in the workspace)
+  allocator-designs\     standalone `blog_os` post-11 crate: the bump, linked-list
+                         and fixed-size block allocators, always `no_std`
+                         (not in the workspace)
 build\
   iso.rs                 ISO9660 + El Torito writer
   fat16.rs               host-side FAT16 image builder (seeds the data disk)
@@ -450,6 +458,7 @@ scripts\
   hardware-interrupts.ps1 build + boot (or -Test) the `examples/hardware-interrupts` kernel
   paging.ps1             build + boot (or -Test) the `examples/paging` kernel
   heap-allocation.ps1    build + boot (or -Test) the `examples/heap-allocation` kernel
+  allocator-designs.ps1  build + boot (or -Test) the `examples/allocator-designs` kernel
   smoke-test.ps1         end-to-end boot test (BIOS and UEFI; -Iso for the disc image)
   screenshot.ps1         capture the desktop framebuffer to PNG
 tools\
@@ -478,9 +487,12 @@ the framebuffer, so a crash in the renderer still leaves a serial log.
 
 **Heap.** `memory::init` picks the largest usable region that does not overlap
 the kernel image, takes its top 32 MiB, and hands
-`physical_memory_offset + address` to `linked_list_allocator`. Nothing may
-allocate before that point: the banner and boot log deliberately use
-`format_args!` rather than `format!`.
+`physical_memory_offset + address` to the global allocator. That allocator is
+post-11's fixed-size block design (`kernel/src/allocator/`): one free list per
+power-of-two size class, with a `linked_list_allocator` fallback for large
+requests, so a freed block is reused immediately instead of waiting for the whole
+heap to empty. Nothing may allocate before that point: the banner and boot log
+deliberately use `format_args!` rather than `format!`.
 
 **Interrupts.** Before the IDT is loaded, `usermode::init_gdt` installs the GDT
 and TSS, including the interrupt stack the double-fault handler runs on (post-06);
@@ -546,8 +558,12 @@ Paging* post together with the paging *implementation* — which reads `CR3`, wa
 the four-level table, maps a page through an `OffsetPageTable` and hands out
 frames from the bootloader's memory map.
 [`examples/heap-allocation/`](examples/heap-allocation/README.md) is post-10 — the
-*Heap Allocation* post — which maps a `linked_list_allocator` heap through the
-paging layer, installs a `#[global_allocator]`, and uses `Box`, `Vec` and `Rc`.
+*Heap Allocation* post — which maps a heap through the paging layer, installs a
+`#[global_allocator]`, and uses `Box`, `Vec` and `Rc`.
+[`examples/allocator-designs/`](examples/allocator-designs/README.md) is post-11 —
+the *Allocator Designs* post — which replaces that implementation with three
+designs written from scratch (a bump allocator, a linked-list allocator and a
+fixed-size block allocator) and installs the last.
 
 ## Desktop environment
 
@@ -626,8 +642,10 @@ Four test binaries run:
   the timer (post-07: the tick count advances, and printing through the same
   lock while the timer fires does not deadlock), the paging API (post-08:
   the hand-written walk and the mapper agree, and a freshly mapped page reads
-  back), and the kernel heap (post-10: a `Box` and a growing `Vec` round-trip
-  through the global allocator, with the pointer landing in the heap window),
+  back), and the kernel heap (post-10/11: a `Box` and a growing `Vec` round-trip
+  through the global allocator with the pointer landing in the heap window, the
+  installed design is the fixed-size block allocator, and a long-lived allocation
+  does not starve the heap),
 - **`tests/should_panic.rs`** (`harness = false`) — asserts that the harness
   notices a panicking test,
 - **`tests/stack_overflow.rs`** (`harness = false`) — post-06: overflows the
@@ -653,13 +671,15 @@ The runner also has an `--image <elf> [<out.img>]` mode that only builds the
 bootable disk image and prints its path; `scripts\minimal.ps1`,
 `scripts\vga-text.ps1`, `scripts\testing.ps1`, `scripts\cpu-exceptions.ps1`,
 `scripts\double-faults.ps1`, `scripts\hardware-interrupts.ps1`,
-`scripts\paging.ps1` and `scripts\heap-allocation.ps1` use it to boot their
-standalone `examples/` kernels.
+`scripts\paging.ps1`, `scripts\heap-allocation.ps1` and
+`scripts\allocator-designs.ps1` use it to boot their standalone `examples/`
+kernels.
 
 The `examples/` crates are a small `blog_os`-post-by-post series, each with its
 own README: post-02 (`minimal`), post-03 (`vga-text`), post-04 (`testing`),
 post-05 (`cpu-exceptions`), post-06 (`double-faults`), post-07
-(`hardware-interrupts`), post-08 (`paging`) and post-10 (`heap-allocation`).
+(`hardware-interrupts`), post-08 (`paging`), post-10 (`heap-allocation`) and
+post-11 (`allocator-designs`).
 Each builds standalone and is deliberately *not* part of the host workspace.
 `minimal` and `vga-text` are dual-mode — `no_std` for the kernel, `std` under
 `cfg(test)` — so their unit tests (14 and 15 respectively) run on the **host**
@@ -695,17 +715,17 @@ powershell -ExecutionPolicy Bypass -File scripts\testing.ps1 -Test
 ```
 
 `examples/cpu-exceptions` is the post-05 kernel; it is always `no_std` too, so
-its four `#[test_case]` unit tests (one of which raises a breakpoint),
-`tests/breakpoint.rs` and its post-07/post-08/post-10 hook tests (`tests/timer.rs`,
-`tests/paging.rs`, `tests/heap_allocation.rs`) run inside QEMU:
+its twelve `#[test_case]` unit tests (one of which raises a breakpoint),
+`tests/breakpoint.rs` and its post-07/post-08/post-10/post-11 hook tests
+(`tests/timer.rs`, `tests/paging.rs`, `tests/heap_allocation.rs`) run inside QEMU:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\cpu-exceptions.ps1 -Test
 ```
 
 `examples/double-faults` is the post-06 kernel; it is always `no_std` too, so its
-six `#[test_case]` unit tests, `tests/stack_overflow.rs` and its
-post-07/post-08/post-10 hook tests (`tests/timer.rs`, `tests/paging.rs`,
+fourteen `#[test_case]` unit tests, `tests/stack_overflow.rs` and its
+post-07/post-08/post-10/post-11 hook tests (`tests/timer.rs`, `tests/paging.rs`,
 `tests/heap_allocation.rs`) run inside QEMU. The
 stack-overflow test runs without the normal harness (a double fault cannot
 return) and passes by exiting QEMU from the handler on the interrupt stack:
@@ -715,9 +735,9 @@ powershell -ExecutionPolicy Bypass -File scripts\double-faults.ps1 -Test
 ```
 
 `examples/hardware-interrupts` is the post-07 kernel; it is always `no_std` too,
-so its seven `#[test_case]` unit tests, `tests/hardware_interrupts.rs` and its
-post-08/post-10 hook tests (`tests/paging.rs`, `tests/heap_allocation.rs`) run
-inside QEMU. The integration test drives
+so its fifteen `#[test_case]` unit tests, `tests/hardware_interrupts.rs` and its
+post-08/post-10/post-11 hook tests (`tests/paging.rs`, `tests/heap_allocation.rs`)
+run inside QEMU. The integration test drives
 the live timer through `hlt`, checks the keyboard decoder, and turns on the
 timer's dot printing while the main thread prints through the same lock, which is
 what proves the post-07 `without_interrupts` fix holds:
@@ -729,26 +749,43 @@ powershell -ExecutionPolicy Bypass -File scripts\hardware-interrupts.ps1 -Test
 `examples/paging` is the post-08 kernel — the *Introduction to Paging* post plus
 the paging *implementation* — and the first example whose bootloader config turns
 on the physical-memory window for its own boot path (post-08 is *about* that
-window). It is always `no_std` too, so its thirteen `#[test_case]` unit tests,
-`tests/paging.rs` and its post-10 hook test (`tests/heap_allocation.rs`) run
-inside QEMU; they check the window, the `CR3` frame, the hand-written walk against
-the mapper, the `EmptyFrameAllocator` failure and a real mapping read back, plus
-the carried-forward post-07 timer:
+window). It is always `no_std` too, so its twenty-one `#[test_case]` unit tests,
+`tests/paging.rs` and its post-10/post-11 hook test (`tests/heap_allocation.rs`)
+run inside QEMU; they check the window, the `CR3` frame, the hand-written walk
+against the mapper, the `EmptyFrameAllocator` failure and a real mapping read
+back, plus the carried-forward post-07 timer:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\paging.ps1 -Test
 ```
 
 `examples/heap-allocation` is the post-10 kernel — the *Heap Allocation* post —
-which maps a `linked_list_allocator` heap at a fixed virtual address through the
-paging layer, installs a `#[global_allocator]` and uses `Box`, `Vec` and `Rc`. It
-is always `no_std` too, so its sixteen `#[test_case]` unit tests and
-`tests/heap_allocation.rs` run inside QEMU; they check a `Box` round-trip, a `Vec`
-that grows by reallocating, a heap pointer landing inside the mapped window, and
-the carried-forward post-07 timer:
+which maps a heap at a fixed virtual address through the paging layer, installs a
+`#[global_allocator]` and uses `Box`, `Vec` and `Rc`. It is always `no_std` too,
+so its twenty-four `#[test_case]` unit tests and `tests/heap_allocation.rs` run
+inside QEMU; they check a `Box` round-trip, a `Vec` that grows by reallocating,
+`many_boxes_long_lived` (one allocation held live across the whole loop), a heap
+pointer landing inside the mapped window, and the carried-forward post-07 timer.
+As a forward hook it also carries post-11's three allocator designs and installs
+the fixed-size block one:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\heap-allocation.ps1 -Test
+```
+
+`examples/allocator-designs` is the post-11 kernel — the *Allocator Designs*
+post — which replaces the `linked_list_allocator` implementation with three
+designs written from scratch (a bump allocator, a linked-list allocator and a
+fixed-size block allocator, the last of which it installs). It is always `no_std`
+too, so its twenty-four `#[test_case]` unit tests (the designs' own, over a small
+scratch region) and `tests/allocator_designs.rs` run inside QEMU; they check the
+bump allocator's consecutive blocks and its starving under a long-lived
+allocation, the linked-list allocator's free-list reuse, the fixed-size block
+allocator's size-class reuse and its large-allocation fallback, and the
+`many_boxes_long_lived` test that separates the three:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\allocator-designs.ps1 -Test
 ```
 
 The in-QEMU tests must be run from their crate directory: Cargo reads

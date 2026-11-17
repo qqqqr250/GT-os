@@ -1,5 +1,5 @@
 //! `blog_os` post-10, done properly: a minimal bare-metal kernel with a heap and
-//! a global allocator.
+//! a global allocator, carrying post-11's allocator designs forward.
 //!
 //! Post-10 is the *Heap Allocation* post. Until now the kernel only ever used the
 //! stack and `static`s; this post adds dynamic memory: a virtual heap region
@@ -24,10 +24,13 @@
 //! - [`memory`] carries the paging API: [`memory::active_level_4_frame`],
 //!   a hand-written [`memory::translate_addr`] walk, and the real
 //!   [`memory::init_paging`] / [`memory::map_page`] path,
-//! - [`allocator`] adds the heap: [`allocator::init_heap`] maps
-//!   [`allocator::HEAP_SIZE`] bytes at [`allocator::HEAP_START`] and installs the
-//!   [`allocator::Dummy`]-to-`LockedHeap` global allocator, so `Box`, `Vec` and
-//!   `Rc` work.
+//! - [`allocator`] adds the heap and, as a forward hook, post-11's designs:
+//!   [`allocator::init_heap`] maps [`allocator::HEAP_SIZE`] bytes at
+//!   [`allocator::HEAP_START`], and the global allocator is the post-11
+//!   [`allocator::fixed_size_block`] design, so `Box`, `Vec` and `Rc` work. The
+//!   [`allocator::bump`] and [`allocator::linked_list`] designs are kept beside it
+//!   for comparison; the full post-11 treatment lives in
+//!   `examples/allocator-designs`.
 //!
 //! Everything runs on COM1: the post's own output goes to the VGA text buffer,
 //! which a headless `cargo test` cannot read. See the crate `README.md`.
@@ -59,7 +62,7 @@
 )]
 
 // The heap is what this post is about: `alloc` provides `Box`, `Vec`, `Rc` and
-// the `GlobalAlloc` trait the [`allocator`] module implements.
+// the `GlobalAlloc` trait the [`allocator`] module's designs implement.
 extern crate alloc;
 
 pub mod allocator;

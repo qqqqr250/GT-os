@@ -1,7 +1,11 @@
 //! Heap allocator backed by the largest usable region reported by the
 //! bootloader, plus a paging layer over the active page table.
 //!
-//! The heap ([`init`], [`info`]) is what `kernel_main` uses. The paging layer
+//! The heap ([`init`], [`info`]) is what `kernel_main` uses. Its global allocator
+//! is post-11's [`FixedSizeBlockAllocator`] (see [`crate::allocator`]): a free list
+//! per size class with a `linked_list_allocator` fallback, so a long-lived
+//! allocation never strands the rest of the heap the way a bump allocator would.
+//! The paging layer
 //! ([`init_mapper`], [`with_mapper`], [`translate_addr`], [`init_frame_allocator`],
 //! [`map_page`]) is the post-08 surface: it reads `CR3`, walks the four-level
 //! table, and maps pages through an
@@ -21,8 +25,9 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::allocator::Locked;
+use crate::allocator::fixed_size_block::FixedSizeBlockAllocator;
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
-use linked_list_allocator::LockedHeap;
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::page_table::FrameError;
@@ -38,7 +43,11 @@ const MIN_REGION_BYTES: u64 = 2 * 1024 * 1024;
 const PAGE_SIZE: u64 = 4096;
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
+
+/// The name of the allocator design [`ALLOCATOR`] implements, exposed to the
+/// in-QEMU tests through [`crate::testing::allocator_design`].
+pub const ALLOCATOR_DESIGN: &str = "fixed-size block";
 
 static HEAP_START: AtomicU64 = AtomicU64::new(0);
 static HEAP_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -94,7 +103,7 @@ pub fn init(
         .ok_or("heap address overflows the virtual address space")?;
 
     let heap_bytes = usize::try_from(size).expect("the heap fits in the address space");
-    unsafe { ALLOCATOR.lock().init(heap_start as *mut u8, heap_bytes) };
+    unsafe { ALLOCATOR.lock().init(heap_start as usize, heap_bytes) };
     HEAP_START.store(heap_start, Ordering::Relaxed);
     HEAP_SIZE.store(size, Ordering::Relaxed);
     Ok(())

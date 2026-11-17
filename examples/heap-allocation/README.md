@@ -13,9 +13,11 @@ It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),
 [`examples/cpu-exceptions`](../cpu-exceptions/README.md) (post-05),
 [`examples/double-faults`](../double-faults/README.md) (post-06),
 [`examples/hardware-interrupts`](../hardware-interrupts/README.md) (post-07) and
-[`examples/paging`](../paging/README.md) (post-08 + post-09). It reuses post-04's
-in-QEMU test framework, post-05's exception handling, post-06's GDT/TSS/IST,
-post-07's PIC/PIT/keyboard and post-08/09's paging layer, and adds the heap.
+[`examples/paging`](../paging/README.md) (post-08 + post-09) and
+[`examples/allocator-designs`](../allocator-designs/README.md) (post-11). It reuses
+post-04's in-QEMU test framework, post-05's exception handling, post-06's
+GDT/TSS/IST, post-07's PIC/PIT/keyboard and post-08/09's paging layer, and adds the
+heap. As a forward hook it also carries post-11's allocator designs.
 
 ## What post-10 does
 
@@ -35,6 +37,12 @@ memory in three steps:
 
 With that in place, `Box`, `Vec`, `Rc` and every other `alloc` type work.
 
+Post-11 replaces the `linked_list_allocator` implementation with three designs
+written from scratch — a bump allocator, a linked-list allocator and a fixed-size
+block allocator — and this crate carries them forward, installing the last. See
+[`allocator`](src/allocator.rs) and
+[`examples/allocator-designs`](../allocator-designs/README.md).
+
 ## What this crate does instead
 
 The heap shape is the tutorial's, but rebuilt around this repository's
@@ -43,7 +51,8 @@ conventions:
 | the tutorial | here |
 | --- | --- |
 | the mapper and frame allocator are passed to `init_heap` by hand | [`allocator::init_heap`](src/allocator.rs) keeps that exact signature for contrast, and [`allocator::init`](src/allocator.rs) is the wrapper that supplies the paging layer's stored ones ([`memory::with_mapper`](src/memory.rs) / [`memory::with_frames`](src/memory.rs)) |
-| `linked_list_allocator` 0.9 | `linked_list_allocator` 0.10, the same crate and version the real kernel in [`kernel/`](../../kernel) uses |
+| `linked_list_allocator` 0.9 | `linked_list_allocator` 0.10, the same crate and version the real kernel in [`kernel/`](../../kernel) uses — kept as the fixed-size design's fallback |
+| the post ends at post-10 | post-11's three allocator designs are carried forward and the fixed-size block design is installed, so a long-lived allocation no longer starves the heap |
 | the post's `main` allocates a `Box`, a `Vec` and an `Rc` inline | [`heap_demo`](src/lib.rs) does the same, but as its own function, and the tests assert the pointers land inside the heap window |
 | the post ends at post-10 | the GDT/TSS/IST, the PIC/PIT/keyboard and the paging layer are carried in unchanged, and a test still asserts the timer interrupts |
 
@@ -57,7 +66,10 @@ Cargo.toml                  standalone package (its own workspace)
 .cargo/config.toml          cargo `runner` (boot the test ELF in QEMU) + the `qtest` alias
 src/lib.rs                  print! macros, the post-04 test framework, kernel_main, heap_demo, unit tests
 src/main.rs                 the bootable binary: bootloader config + entry_point!
-src/allocator.rs            the heap: Dummy, init_heap, the LockedHeap global allocator
+src/allocator.rs            the heap: Dummy, init_heap, Locked and the installed fixed-size block allocator
+src/allocator/bump.rs       the bump allocator design
+src/allocator/linked_list.rs  the linked-list (free-list) allocator design
+src/allocator/fixed_size_block.rs  the fixed-size block allocator design
 src/memory.rs               the paging layer the heap is built on (post-08 + post-09)
 src/gdt.rs                  the GDT, the TSS and the interrupt stack table (post-06)
 src/interrupts.rs           the IDT, the PIC/PIT setup, the timer/keyboard/exception handlers
@@ -88,11 +100,12 @@ or, from the repository root:
 powershell -ExecutionPolicy Bypass -File scripts\heap-allocation.ps1 -Test
 ```
 
-Two test binaries run — the library's unit tests (including the three heap tests)
-and `tests/heap_allocation.rs` — and QEMU reports success as exit code 33 (the
-framework writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`). The tests cover
-a `Box` round-trip, a `Vec` that grows by reallocating, a heap pointer landing
-inside the mapped window, and the post-07 timer.
+Two test binaries run — the library's unit tests (the heap tests plus the three
+designs' own tests) and `tests/heap_allocation.rs` — and QEMU reports success as
+exit code 33 (the framework writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`).
+The tests cover a `Box` round-trip, a `Vec` that grows by reallocating, many boxes,
+`many_boxes_long_lived`, a heap pointer landing inside the mapped window, and the
+post-07 timer.
 
 Build the bootable kernel and boot it (BIOS, via the shared `runner`):
 
@@ -108,10 +121,12 @@ for an optimised build, or extra QEMU arguments after `--`.
 
 ## Scope
 
-Post-10 is the heap interface, the heap region and the `linked_list_allocator`
-that hands it out; the allocator's own design (bump, linked-list, fixed-size
-blocks) is the next post. The real kernel in [`kernel/`](../../kernel) already has
-a heap, and post-11's allocator designs build on the same `GlobalAlloc` interface.
+Post-10 is the heap interface, the heap region and the allocator that hands it out;
+post-11 is the allocator's own design — a bump allocator, a linked-list allocator
+and a fixed-size block allocator, the last of which this crate installs as a
+forward hook. The full post-11 treatment is
+[`examples/allocator-designs`](../allocator-designs/README.md), and the real kernel
+in [`kernel/`](../../kernel) already carries both forward.
 
 > **Why the console is COM1.** Post-10's kernel prints to the VGA text buffer;
 > this crate's console is COM1, because that is the only console a headless

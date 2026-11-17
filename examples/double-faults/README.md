@@ -91,13 +91,16 @@ src/interrupts.rs           the IDT, the exception handlers, the post-07 timer h
 src/pic.rs                  the hand-rolled 8259 PIC: remap, mask, EOI (post-07)
 src/pit.rs                  the 8254 PIT: the tick rate and its divisor (post-07)
 src/memory.rs               the post-08 paging hook: CR3, the table walk, the mapper and the frame allocators
-src/allocator.rs            the post-10 heap hook: the heap region, Dummy and the LockedHeap global allocator
+src/allocator.rs            the post-10/11 heap hook: the heap region, Dummy, Locked and the installed fixed-size block allocator
+src/allocator/bump.rs       the bump allocator design
+src/allocator/linked_list.rs  the linked-list (free-list) allocator design
+src/allocator/fixed_size_block.rs  the fixed-size block allocator design
 src/serial.rs               a minimal COM1 UART driver (the console)
 src/port.rs                 x86 port I/O, used by the UART, the PIC/PIT and exit_qemu
 tests/stack_overflow.rs     in-QEMU stack-overflow test (harness = false)
 tests/timer.rs              in-QEMU test for the post-07 timer hook
 tests/paging.rs             in-QEMU test for the post-08 paging hook
-tests/heap_allocation.rs    in-QEMU test for the post-10 heap hook
+tests/heap_allocation.rs    in-QEMU test for the post-10/11 heap hook
 ```
 
 ## Test, build and run
@@ -120,12 +123,13 @@ powershell -ExecutionPolicy Bypass -File scripts\double-faults.ps1 -Test
 ```
 
 Five test binaries run — the library's unit tests (including one that raises a
-breakpoint and one that asserts the TSS names a double-fault stack),
-`tests/stack_overflow.rs` (the stack-overflow double fault), `tests/timer.rs`
-(the post-07 timer hook, which asserts `interrupts::ticks` advances while the CPU
-idles in `hlt`), `tests/paging.rs` (the post-08 paging hook, which maps a fresh
-page and reads the value back) and `tests/heap_allocation.rs` (the post-10 heap
-hook, which allocates a `Box` and grows a `Vec`) — and QEMU reports success as exit code 33 (the
+breakpoint, one that asserts the TSS names a double-fault stack, and the allocator
+designs' own tests), `tests/stack_overflow.rs` (the stack-overflow double fault),
+`tests/timer.rs` (the post-07 timer hook, which asserts `interrupts::ticks`
+advances while the CPU idles in `hlt`), `tests/paging.rs` (the post-08 paging hook,
+which maps a fresh page and reads the value back) and `tests/heap_allocation.rs`
+(the post-10/11 heap hook, which allocates a `Box`, grows a `Vec` and runs
+`many_boxes_long_lived`) — and QEMU reports success as exit code 33 (the
 framework writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`). A passing
 stack-overflow test shows:
 
@@ -163,10 +167,12 @@ config turns on the physical-memory window. The full post-08 treatment is
 [`examples/paging`](../paging/README.md).
 
 A third forward-looking hook, [`allocator`](src/allocator.rs), brings forward
-post-10's heap: it maps a `linked_list_allocator` heap through the paging layer and
-installs a `#[global_allocator]`, so `Box`, `Vec` and `Rc` work. It is exercised
-through the crate's public API by `tests/heap_allocation.rs`. The full post-10
-treatment is [`examples/heap-allocation`](../heap-allocation/README.md).
+post-10's heap *interface* and post-11's allocator *designs*: it maps a heap through
+the paging layer and installs a `#[global_allocator]`, so `Box`, `Vec` and `Rc`
+work, and it implements the allocator with the three designs post-11 builds — a
+bump, a linked-list and a fixed-size block allocator — installing the last. It is
+exercised through the crate's public API by `tests/heap_allocation.rs`. The full
+treatment is [`examples/allocator-designs`](../allocator-designs/README.md).
 
 > **Why there is no VGA writer here.** Post-06's kernel prints to the VGA text
 > buffer; this crate's console is COM1, because that is the only console a
