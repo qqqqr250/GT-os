@@ -219,6 +219,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",
+ "futures-util",
  "linked_list_allocator",
  "spin",
  "x86_64",

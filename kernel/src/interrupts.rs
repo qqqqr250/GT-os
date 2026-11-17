@@ -10,7 +10,7 @@ use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::{PrivilegeLevel, VirtAddr};
 
-use crate::{console, input, keyboard, mouse, serial};
+use crate::{console, input, mouse, serial};
 
 /// Frequency of the programmable interval timer interrupt.
 pub const TICK_HZ: u32 = 100;
@@ -192,7 +192,9 @@ extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
     let scancode = unsafe { Port::<u8>::new(0x60).read() };
-    keyboard::handle_scancode(scancode);
+    // Post-12: the handler only queues the raw scancode and wakes the decoding
+    // task; the task turns it into input on the main thread.
+    crate::task::keyboard::add_scancode(scancode);
     end_of_interrupt(1);
 }
 

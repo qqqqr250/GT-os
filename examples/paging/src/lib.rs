@@ -32,7 +32,15 @@
 //!   so `Box`, `Vec` and `Rc` work, and it implements the allocator with the three
 //!   designs post-11 builds ([`allocator::bump`], [`allocator::linked_list`],
 //!   [`allocator::fixed_size_block`]), installing the last. The full treatment
-//!   lives in `examples/allocator-designs`.
+//!   lives in `examples/allocator-designs`,
+//! - as a final hook, [`sync`] and [`task`] bring forward post-12: a hand-written
+//!   bounded lock-free queue ([`sync::ArrayQueue`]) and one-shot initialiser
+//!   ([`sync::OnceCell`]), and on top of them [`task::Task`], the naive
+//!   [`task::simple_executor::SimpleExecutor`], the waker-based
+//!   [`task::executor::Executor`] and the async keyboard
+//!   ([`task::keyboard::ScancodeStream`]). The keyboard IRQ now only pushes the
+//!   raw scancode and wakes the decoder task. The full post-12 treatment lives in
+//!   `examples/async-await`.
 //!
 //! Everything runs on COM1: post-08's own output goes to the VGA text buffer,
 //! which a headless `cargo test` cannot read. See the crate `README.md`.
@@ -75,6 +83,8 @@ pub mod memory;
 pub mod pic;
 pub mod pit;
 pub mod serial;
+pub mod sync;
+pub mod task;
 
 mod port;
 

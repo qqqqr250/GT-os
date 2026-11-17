@@ -57,3 +57,6 @@ bootloader_api = "0.11.12"
 x86_64 = "0.15.2"
 spin = "0.9.8"
 linked_list_allocator = "0.10.5"
+# post-12: `Stream`/`StreamExt` and `AtomicWaker` for the async keyboard. The
+# queue and the once-cell are hand-written (see `src/sync`).
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }

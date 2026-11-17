@@ -32,7 +32,15 @@
 //!   `Vec` and `Rc` work, and it implements the allocator with the three designs
 //!   post-11 builds ([`allocator::bump`], [`allocator::linked_list`],
 //!   [`allocator::fixed_size_block`]), installing the last. The full treatment
-//!   lives in `examples/allocator-designs`.
+//!   lives in `examples/allocator-designs`,
+//! - as a final hook, [`sync`] and [`task`] bring forward post-12: a hand-written
+//!   bounded lock-free queue ([`sync::ArrayQueue`]) and one-shot initialiser
+//!   ([`sync::OnceCell`]), and on top of them [`task::Task`], the naive
+//!   [`task::simple_executor::SimpleExecutor`], the waker-based
+//!   [`task::executor::Executor`] and the async keyboard
+//!   ([`task::keyboard::ScancodeStream`]). The keyboard IRQ now only pushes the
+//!   raw scancode and wakes the decoder task. The full post-12 treatment lives in
+//!   `examples/async-await`.
 //!
 //! Everything runs on COM1: post-07's own output goes to the VGA text buffer,
 //! which a headless `cargo test` cannot read. See the crate `README.md`.
@@ -75,6 +83,8 @@ pub mod memory;
 pub mod pic;
 pub mod pit;
 pub mod serial;
+pub mod sync;
+pub mod task;
 
 mod port;
 
@@ -279,7 +289,8 @@ pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
 // The library's own unit tests. They run inside QEMU like every other test in
 // this crate, because the crate is `no_std` even under `cfg(test)`. The GDT, the
 // IDT, the PIC and the PIT are installed by the test entry point below, so the
-// timer is already ticking when these run.
+// timer is already ticking when these run; the heap is built there too, so the
+// post-12 sync and task tests can allocate.
 #[cfg(test)]
 mod tests {
     use super::QemuExitCode;
@@ -360,17 +371,35 @@ mod tests {
 /// entry point.
 #[cfg(test)]
 mod test_entry {
+    use bootloader_api::config::Mapping;
     use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 
-    static TEST_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
+    /// The post-12 sync/task tests allocate through the global allocator, so the
+    /// test config turns on the physical-memory window the heap is built on —
+    /// exactly like the bootable binary's configuration in `src/main.rs`.
+    static TEST_CONFIG: BootloaderConfig = {
+        let mut config = BootloaderConfig::new_default();
+        config.mappings.physical_memory = Some(Mapping::Dynamic);
+        config
+    };
 
     entry_point!(test_kernel_main, config = &TEST_CONFIG);
 
-    fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+    fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::serial::init();
         // Install the GDT/TSS and the IDT/PIC/PIT before the harness runs: the
         // timer test needs the tick to be live and the GDT test needs the TSS.
         crate::init();
+        // Then build the single mapper the paging tests share.
+        let offset = boot_info
+            .physical_memory_offset
+            .into_option()
+            .expect("the test config must map physical memory");
+        // SAFETY: the bootloader mapped all physical memory at `offset`, and this
+        // is the only mapper created in this binary.
+        unsafe { crate::memory::init_paging(offset, &boot_info.memory_regions) };
+        // The post-12 queues allocate, so build the heap before the harness runs.
+        crate::allocator::init().expect("heap initialization failed");
         crate::test_main();
         crate::halt_forever()
     }

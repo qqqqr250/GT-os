@@ -81,12 +81,15 @@ src/allocator.rs        the post-10/11 heap hook: the heap region, Dummy, Locked
 src/allocator/bump.rs   the bump allocator design
 src/allocator/linked_list.rs  the linked-list (free-list) allocator design
 src/allocator/fixed_size_block.rs  the fixed-size block allocator design
+src/sync/mod.rs         the post-12 sync hook: the bounded lock-free queue and the once-cell
+src/task/mod.rs         the post-12 task hook: Task, the executors and the async keyboard
 src/serial.rs           a minimal COM1 UART driver (the console)
 src/port.rs             x86 port I/O, used by the UART, the PIC/PIT and exit_qemu
 tests/breakpoint.rs     in-QEMU integration test for the IDT, through the public API
 tests/timer.rs          in-QEMU integration test for the post-07 timer hook
 tests/paging.rs         in-QEMU integration test for the post-08 paging hook
 tests/heap_allocation.rs  in-QEMU integration test for the post-10/11 heap hook
+tests/task.rs           in-QEMU integration test for the post-12 async hook
 ```
 
 ## Test, build and run
@@ -108,15 +111,17 @@ or, from the repository root:
 powershell -ExecutionPolicy Bypass -File scripts\cpu-exceptions.ps1 -Test
 ```
 
-Five test binaries run — the library's unit tests (including one that raises a
-breakpoint, plus the allocator designs' own tests), `tests/breakpoint.rs` (the IDT
-through the public API), `tests/timer.rs` (the post-07 timer hook, which asserts
-`interrupts::ticks` advances while the CPU idles in `hlt`), `tests/paging.rs` (the
-post-08 paging hook, which maps a fresh page and reads the value back) and
-`tests/heap_allocation.rs` (the post-10/11 heap hook, which allocates a `Box`,
-grows a `Vec` and runs `many_boxes_long_lived`) — and QEMU reports success
-as exit code 33 (the framework writes `0x10`, which QEMU reports as
-`(0x10 << 1) | 1`). A passing run shows the handler's own line, for example:
+Six test binaries run — the library's unit tests (including one that raises a
+breakpoint, the allocator designs' own tests and the post-12 sync/task tests),
+`tests/breakpoint.rs` (the IDT through the public API), `tests/timer.rs` (the
+post-07 timer hook, which asserts `interrupts::ticks` advances while the CPU idles
+in `hlt`), `tests/paging.rs` (the post-08 paging hook, which maps a fresh page and
+reads the value back), `tests/heap_allocation.rs` (the post-10/11 heap hook, which
+allocates a `Box`, grows a `Vec` and runs `many_boxes_long_lived`) and
+`tests/task.rs` (the post-12 async hook, which runs both executors and drives the
+async scancode stream) — and QEMU reports success as exit code 33 (the framework
+writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`). A passing run shows the
+handler's own line, for example:
 
 ```
 EXCEPTION: BREAKPOINT at rip 0x00000100000039ef, rsp 0x0000018000014e48
@@ -159,6 +164,16 @@ work, and it implements the allocator with the three designs post-11 builds — 
 bump, a linked-list and a fixed-size block allocator — installing the last. It is
 exercised through the crate's public API by `tests/heap_allocation.rs`. The full
 treatment is [`examples/allocator-designs`](../allocator-designs/README.md).
+
+A fourth forward-looking hook, [`sync`](src/sync) and [`task`](src/task), brings
+forward post-12's `async`/`await` runtime: a hand-written bounded lock-free queue
+(`sync::ArrayQueue`) and one-shot initialiser (`sync::OnceCell`), and on top of
+them `task::Task`, the naive `task::simple_executor::SimpleExecutor`, the
+waker-based `task::executor::Executor` and the async keyboard
+(`task::keyboard::ScancodeStream`). The keyboard IRQ now only pushes the raw
+scancode and wakes the decoder task. It is exercised through the crate's public API
+by `tests/task.rs`. The full post-12 treatment is
+[`examples/async-await`](../async-await/README.md).
 
 > **Why there is no VGA writer here.** Post-05's kernel prints to the VGA text
 > buffer; this crate's console is COM1, because that is the only console a

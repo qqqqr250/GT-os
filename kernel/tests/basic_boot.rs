@@ -78,6 +78,9 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
         )
         .expect("heap initialization failed");
     }
+    // post-12: start the async runtime (the scancode queue and the keyboard
+    // decoding task). Spawning a task allocates, so it comes after the heap.
+    kernel::testing::init_tasks();
     test_main();
     kernel::testing::halt()
 }
@@ -314,4 +317,20 @@ fn test_a_long_lived_allocation_does_not_starve_the_heap() {
         assert_eq!(*x, i);
     }
     assert_eq!(*long_lived, 0xabcd_1234);
+}
+
+#[test_case]
+fn test_the_async_keyboard_feeds_the_input_queue() {
+    // post-12: the keyboard IRQ only queues the raw scancode; the async decoding
+    // task turns it into a byte in the shared input queue. Push the scancode for
+    // 'a' (0x1e) exactly as the handler does, poll the executor, then read the
+    // decoded byte back.
+    while kernel::testing::take_input().is_some() {}
+    kernel::testing::push_scancode(0x1e); // 'a' make code
+    kernel::testing::poll_tasks();
+    assert_eq!(
+        kernel::testing::take_input(),
+        Some(b'a'),
+        "the async keyboard should have decoded the scancode into the input queue"
+    );
 }

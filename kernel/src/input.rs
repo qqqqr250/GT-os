@@ -1,8 +1,11 @@
-//! A lock-free single-producer/single-consumer byte queue shared between
-//! interrupt handlers (keyboard, serial) and the shell.
+//! A lock-free single-producer/single-consumer byte queue shared between the
+//! input sources and the shell or desktop.
 //!
-//! Both producers run with interrupts disabled (interrupt gates), so pushes
-//! never race with each other; the atomics only order the producer against the
+//! The producers are the post-12 keyboard decoding task (which turns raw
+//! scancodes into bytes) and the COM1 serial interrupt. Both run with interrupts
+//! disabled — the serial handler because it is an interrupt gate, the keyboard
+//! task because it wraps its decode in `without_interrupts` — so pushes never
+//! race with each other; the atomics only order the producers against the
 //! consumer running on the main thread.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};

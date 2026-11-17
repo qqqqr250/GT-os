@@ -56,8 +56,16 @@ name = "paging"
 [[test]]
 name = "heap_allocation"
 
+# The post-12 async hook: the `task` module's two executors and the async
+# keyboard stream are exercised through the crate's public API.
+[[test]]
+name = "task"
+
 [dependencies]
 bootloader_api = "0.11.12"
+# Post-12's `Stream`/`StreamExt` traits and `AtomicWaker`. The bounded queue and
+# the once-cell the post also uses are hand-written in `src/sync`.
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 # The heap itself: a linked-list allocator behind a spin lock, the same crate the
 # real kernel uses.
 linked_list_allocator = "0.10.5"

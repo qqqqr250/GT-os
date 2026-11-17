@@ -43,8 +43,15 @@ interactive shell over the PS/2 keyboard or a serial line.
   shares with the main thread (the serial/console print path, the VGA text
   buffer) is taken inside `without_interrupts`, so a handler that prints can
   never deadlock the thread it interrupted (post-07).
-- **Input** – lock-free SPSC ring buffer shared by the keyboard and serial IRQ
-  handlers; PS/2 scancode set 1 with Shift and Caps Lock.
+- **Input** – lock-free SPSC ring buffer; PS/2 scancode set 1 with Shift and Caps
+  Lock. The keyboard interrupt queues the raw scancode for the async decoder and
+  the serial interrupt writes bytes directly.
+- **Async runtime** – a cooperative multitasking layer: a `Task` wrapping a
+  `Pin<Box<dyn Future>>`, the post's naive `SimpleExecutor`, and a waker-based
+  `Executor` that polls only the tasks that were woken and parks the CPU with
+  `hlt` when none are ready. The keyboard interrupt handler no longer decodes in
+  the interrupt: it pushes raw scancodes into a lock-free queue and wakes an async
+  task that decodes them into the shared input queue (post-12).
 - **Windows XP-style desktop** – when a framebuffer is available the kernel boots
   straight into a Luna-blue desktop: a vertical gradient, a taskbar with a green
   **start** button, draggable windows with blue title bars and close buttons, a
@@ -401,6 +408,12 @@ kernel\
   src\interrupts.rs      IDT, PIC remap, PIT, IRQ handlers, exception reports
   src\input.rs           lock-free input ring buffer
   src\keyboard.rs        PS/2 scancode set 1 → ASCII
+  src\sync\queue.rs      the bounded lock-free MPMC queue the async keyboard feeds (post-12)
+  src\sync\once_cell.rs  the one-shot initialiser for the scancode queue
+  src\task\mod.rs        Task, TaskId and the kernel's async runtime entry points
+  src\task\executor.rs   the waker-based executor: ready queue, waker cache, sleep_if_idle
+  src\task\simple_executor.rs  the naive executor and its dummy waker
+  src\task\keyboard.rs   ScancodeStream, add_scancode and the async decoder task
   src\mouse.rs           PS/2 mouse driver (8042 aux port, 3-byte packets)
   src\pci.rs             PCI bus-0 configuration-space scan (0xCF8/0xCFC)
   src\net.rs             RTL8139 driver + IPv4/ARP/ICMP/UDP/DNS/TCP stack + DHCP
@@ -443,6 +456,9 @@ examples\
   allocator-designs\     standalone `blog_os` post-11 crate: the bump, linked-list
                          and fixed-size block allocators, always `no_std`
                          (not in the workspace)
+  async-await\           standalone `blog_os` post-12 crate: `Task`, the two
+                         executors, the hand-written queue/once-cell and the async
+                         keyboard, always `no_std` (not in the workspace)
 build\
   iso.rs                 ISO9660 + El Torito writer
   fat16.rs               host-side FAT16 image builder (seeds the data disk)
@@ -459,6 +475,7 @@ scripts\
   paging.ps1             build + boot (or -Test) the `examples/paging` kernel
   heap-allocation.ps1    build + boot (or -Test) the `examples/heap-allocation` kernel
   allocator-designs.ps1  build + boot (or -Test) the `examples/allocator-designs` kernel
+  async-await.ps1        build + boot (or -Test) the `examples/async-await` kernel
   smoke-test.ps1         end-to-end boot test (BIOS and UEFI; -Iso for the disc image)
   screenshot.ps1         capture the desktop framebuffer to PNG
 tools\
@@ -500,8 +517,12 @@ the IDT entry names that stack, so it must already be loaded. Then
 `interrupts::init` remaps the 8259 PIC (IRQ0–7 → 0x20–0x27,
 IRQ8–15 → 0x28–0x2F), loads the IDT, programs the PIT for 100 Hz and unmasks
 IRQ0, IRQ1, IRQ2, IRQ4, IRQ12 (remember: a set bit in the PIC's IMR *masks* a
-line). Handlers send EOI and push bytes into `input`, a 256-byte SPSC ring
-buffer that the shell drains while halted with `hlt`.
+line). `kernel_main` starts the async runtime (`task::init`) just before
+`interrupts::init`, so the keyboard IRQ always finds an initialised scancode
+queue. The keyboard handler then only queues the raw scancode and wakes the
+post-12 async decoder, which pushes the decoded byte into `input`, a 256-byte
+SPSC ring buffer that the shell drains while halted with `hlt`; the serial
+handler writes bytes directly.
 
 ## Console fallback
 
@@ -645,7 +666,9 @@ Four test binaries run:
   back), and the kernel heap (post-10/11: a `Box` and a growing `Vec` round-trip
   through the global allocator with the pointer landing in the heap window, the
   installed design is the fixed-size block allocator, and a long-lived allocation
-  does not starve the heap),
+  does not starve the heap), and the async runtime (post-12: a scancode pushed the
+  way the IRQ handler pushes one is decoded by the keyboard task into the input
+  queue after the executor is polled),
 - **`tests/should_panic.rs`** (`harness = false`) — asserts that the harness
   notices a panicking test,
 - **`tests/stack_overflow.rs`** (`harness = false`) — post-06: overflows the
@@ -671,15 +694,15 @@ The runner also has an `--image <elf> [<out.img>]` mode that only builds the
 bootable disk image and prints its path; `scripts\minimal.ps1`,
 `scripts\vga-text.ps1`, `scripts\testing.ps1`, `scripts\cpu-exceptions.ps1`,
 `scripts\double-faults.ps1`, `scripts\hardware-interrupts.ps1`,
-`scripts\paging.ps1`, `scripts\heap-allocation.ps1` and
-`scripts\allocator-designs.ps1` use it to boot their standalone `examples/`
-kernels.
+`scripts\paging.ps1`, `scripts\heap-allocation.ps1`,
+`scripts\allocator-designs.ps1` and `scripts\async-await.ps1` use it to boot their
+standalone `examples/` kernels.
 
 The `examples/` crates are a small `blog_os`-post-by-post series, each with its
 own README: post-02 (`minimal`), post-03 (`vga-text`), post-04 (`testing`),
 post-05 (`cpu-exceptions`), post-06 (`double-faults`), post-07
-(`hardware-interrupts`), post-08 (`paging`), post-10 (`heap-allocation`) and
-post-11 (`allocator-designs`).
+(`hardware-interrupts`), post-08 (`paging`), post-10 (`heap-allocation`), post-11
+(`allocator-designs`) and post-12 (`async-await`).
 Each builds standalone and is deliberately *not* part of the host workspace.
 `minimal` and `vga-text` are dual-mode — `no_std` for the kernel, `std` under
 `cfg(test)` — so their unit tests (14 and 15 respectively) run on the **host**
@@ -786,6 +809,22 @@ allocator's size-class reuse and its large-allocation fallback, and the
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\allocator-designs.ps1 -Test
+```
+
+`examples/async-await` is the post-12 kernel — the *Async/Await* post — which adds
+a cooperative multitasking runtime on top of post-11's heap: a `Task` wrapping a
+`Pin<Box<dyn Future>>`, the naive `SimpleExecutor`, and a waker-based `Executor`
+with a ready queue, a per-task waker cache and `sleep_if_idle`, plus the async
+keyboard whose interrupt handler queues raw scancodes for a decoding task. It is
+always `no_std` too, so its `#[test_case]` unit tests (the heap and allocator
+tests carried forward, plus the queue, the once-cell and both executors) and
+`tests/async_await.rs` run inside QEMU; they check a `Box` round-trip, a growing
+`Vec`, `many_boxes_long_lived`, both executors running a task, and the async
+keyboard stream yielding a scancode pushed the way the interrupt handler pushes
+one:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\async-await.ps1 -Test
 ```
 
 The in-QEMU tests must be run from their crate directory: Cargo reads

@@ -13,8 +13,9 @@ It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),
 [`examples/cpu-exceptions`](../cpu-exceptions/README.md) (post-05),
 [`examples/double-faults`](../double-faults/README.md) (post-06),
 [`examples/hardware-interrupts`](../hardware-interrupts/README.md) (post-07) and
-[`examples/paging`](../paging/README.md) (post-08 + post-09) and
-[`examples/allocator-designs`](../allocator-designs/README.md) (post-11). It reuses
+[`examples/paging`](../paging/README.md) (post-08 + post-09),
+[`examples/allocator-designs`](../allocator-designs/README.md) (post-11) and
+[`examples/async-await`](../async-await/README.md) (post-12). It reuses
 post-04's in-QEMU test framework, post-05's exception handling, post-06's
 GDT/TSS/IST, post-07's PIC/PIT/keyboard and post-08/09's paging layer, and adds the
 heap. As a forward hook it also carries post-11's allocator designs.
@@ -53,6 +54,7 @@ conventions:
 | the mapper and frame allocator are passed to `init_heap` by hand | [`allocator::init_heap`](src/allocator.rs) keeps that exact signature for contrast, and [`allocator::init`](src/allocator.rs) is the wrapper that supplies the paging layer's stored ones ([`memory::with_mapper`](src/memory.rs) / [`memory::with_frames`](src/memory.rs)) |
 | `linked_list_allocator` 0.9 | `linked_list_allocator` 0.10, the same crate and version the real kernel in [`kernel/`](../../kernel) uses — kept as the fixed-size design's fallback |
 | the post ends at post-10 | post-11's three allocator designs are carried forward and the fixed-size block design is installed, so a long-lived allocation no longer starves the heap |
+| the post ends at post-10 | post-12's async runtime is carried forward, so a keyboard interrupt wakes a decoder task instead of decoding in the handler |
 | the post's `main` allocates a `Box`, a `Vec` and an `Rc` inline | [`heap_demo`](src/lib.rs) does the same, but as its own function, and the tests assert the pointers land inside the heap window |
 | the post ends at post-10 | the GDT/TSS/IST, the PIC/PIT/keyboard and the paging layer are carried in unchanged, and a test still asserts the timer interrupts |
 
@@ -70,6 +72,8 @@ src/allocator.rs            the heap: Dummy, init_heap, Locked and the installed
 src/allocator/bump.rs       the bump allocator design
 src/allocator/linked_list.rs  the linked-list (free-list) allocator design
 src/allocator/fixed_size_block.rs  the fixed-size block allocator design
+src/sync/mod.rs             the post-12 sync hook: the bounded lock-free queue and the once-cell
+src/task/mod.rs             the post-12 task hook: Task, the executors and the async keyboard
 src/memory.rs               the paging layer the heap is built on (post-08 + post-09)
 src/gdt.rs                  the GDT, the TSS and the interrupt stack table (post-06)
 src/interrupts.rs           the IDT, the PIC/PIT setup, the timer/keyboard/exception handlers
@@ -79,6 +83,7 @@ src/keyboard.rs             a scancode-set-1 decoder and the input queue
 src/serial.rs               a minimal COM1 UART driver, with the `without_interrupts` fix
 src/port.rs                 x86 port I/O, used by the UART, the PIC/PIT and exit_qemu
 tests/heap_allocation.rs    in-QEMU tests for Box, a growing Vec and many boxes
+tests/task.rs               in-QEMU tests for the post-12 async hook
 ```
 
 ## Test, build and run
@@ -100,12 +105,13 @@ or, from the repository root:
 powershell -ExecutionPolicy Bypass -File scripts\heap-allocation.ps1 -Test
 ```
 
-Two test binaries run — the library's unit tests (the heap tests plus the three
-designs' own tests) and `tests/heap_allocation.rs` — and QEMU reports success as
-exit code 33 (the framework writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`).
-The tests cover a `Box` round-trip, a `Vec` that grows by reallocating, many boxes,
-`many_boxes_long_lived`, a heap pointer landing inside the mapped window, and the
-post-07 timer.
+Three test binaries run — the library's unit tests (the heap tests, the three
+designs' own tests and the post-12 sync/task tests), `tests/heap_allocation.rs` and
+`tests/task.rs` (the post-12 async hook, which runs both executors and drives the
+async scancode stream) — and QEMU reports success as exit code 33 (the framework
+writes `0x10`, which QEMU reports as `(0x10 << 1) | 1`). The tests cover a `Box`
+round-trip, a `Vec` that grows by reallocating, many boxes, `many_boxes_long_lived`,
+a heap pointer landing inside the mapped window, and the post-07 timer.
 
 Build the bootable kernel and boot it (BIOS, via the shared `runner`):
 
@@ -127,6 +133,16 @@ and a fixed-size block allocator, the last of which this crate installs as a
 forward hook. The full post-11 treatment is
 [`examples/allocator-designs`](../allocator-designs/README.md), and the real kernel
 in [`kernel/`](../../kernel) already carries both forward.
+
+As a further forward-looking hook, [`sync`](src/sync) and [`task`](src/task) bring
+forward post-12's `async`/`await` runtime: a hand-written bounded lock-free queue
+(`sync::ArrayQueue`) and one-shot initialiser (`sync::OnceCell`), and on top of
+them `task::Task`, the naive `task::simple_executor::SimpleExecutor`, the
+waker-based `task::executor::Executor` and the async keyboard
+(`task::keyboard::ScancodeStream`). The keyboard IRQ now only pushes the raw
+scancode and wakes the decoder task. It is exercised through the crate's public API
+by `tests/task.rs`. The full post-12 treatment is
+[`examples/async-await`](../async-await/README.md).
 
 > **Why the console is COM1.** Post-10's kernel prints to the VGA text buffer;
 > this crate's console is COM1, because that is the only console a headless

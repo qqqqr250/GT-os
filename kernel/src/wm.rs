@@ -1972,6 +1972,10 @@ pub fn run() {
             return;
         }
 
+        // Post-12: the keyboard interrupt only queues raw scancodes; poll the
+        // async decoding task so they reach the input queue read below.
+        crate::task::poll();
+
         // Keep the pointer on screen: the driver only clamps at zero, and a
         // cursor-only update no longer goes through `render()`.
         {

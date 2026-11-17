@@ -205,7 +205,9 @@ extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
     // SAFETY: port 0x60 is the PS/2 data port.
     let scancode = unsafe { Port::<u8>::new(0x60).read() };
-    crate::keyboard::handle_scancode(scancode);
+    // Post-12: the handler only pushes the raw scancode and wakes the async
+    // decoder; the decoding itself happens in the executor's keyboard task.
+    crate::task::keyboard::add_scancode(scancode);
     pic::end_of_interrupt(1);
 }
 

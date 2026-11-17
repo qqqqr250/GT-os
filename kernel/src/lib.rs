@@ -50,6 +50,8 @@ mod net;
 mod pci;
 mod serial;
 mod shell;
+mod sync;
+mod task;
 mod usermode;
 mod vga;
 mod volatile;
@@ -148,6 +150,10 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // The GDT and TSS must be loaded before the IDT names the double-fault IST
     // stack, so a stack-overflow double fault has somewhere to go.
     usermode::init_gdt();
+
+    // Start the async runtime before the keyboard IRQ is unmasked, so the handler
+    // always finds an initialised scancode queue.
+    task::init();
 
     interrupts::init();
     mouse::init();
@@ -429,8 +435,19 @@ mod test_entry {
 
     entry_point!(test_kernel_main, config = &TEST_CONFIG);
 
-    fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+    fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::serial::init();
+        // The post-12 sync and task tests allocate, so build the kernel heap
+        // before the harness runs. The heap lives in the bootloader's
+        // physical-memory window, which the test config maps.
+        if let Some(offset) = boot_info.physical_memory_offset.into_option() {
+            crate::memory::init(
+                &boot_info.memory_regions,
+                (boot_info.kernel_addr, boot_info.kernel_len),
+                offset,
+            )
+            .expect("heap initialization failed");
+        }
         crate::test_main();
         crate::halt_forever()
     }
@@ -621,6 +638,33 @@ pub mod testing {
     /// deadlock fix.
     pub fn set_timer_dots(enabled: bool) {
         crate::interrupts::set_timer_dots(enabled);
+    }
+
+    /// Starts the post-12 async runtime: the scancode queue and the keyboard
+    /// decoding task.
+    ///
+    /// Spawning a task allocates, so call this after [`init_heap`]. `kernel_main`
+    /// calls it before [`init_idt`]; the tests build the heap after the IDT, so
+    /// they call it here instead.
+    pub fn init_tasks() {
+        crate::task::init();
+    }
+
+    /// Polls every ready async task once.
+    pub fn poll_tasks() {
+        crate::task::poll();
+    }
+
+    /// Feeds one raw scancode into the async keyboard, exactly as the IRQ
+    /// handler does.
+    pub fn push_scancode(scancode: u8) {
+        crate::task::keyboard::add_scancode(scancode);
+    }
+
+    /// Removes and returns the next byte the keyboard produced, if any.
+    #[must_use]
+    pub fn take_input() -> Option<u8> {
+        crate::input::pop()
     }
 
     /// Prints one line through the kernel's normal print path.

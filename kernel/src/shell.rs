@@ -9,7 +9,7 @@ use core::fmt;
 use bootloader_api::info::{BootInfo, MemoryRegionKind};
 
 use crate::console::{print, println};
-use crate::{ata, audio, console, fat, input, interrupts, memory, net, usermode};
+use crate::{ata, audio, console, fat, input, interrupts, memory, net, task, usermode};
 
 const PROMPT: &str = "rustos> ";
 const BANNER_WIDTH: usize = 62;
@@ -86,6 +86,9 @@ pub fn run(boot_info: &'static BootInfo) -> ! {
 
 fn wait_for_input() -> u8 {
     loop {
+        // Post-12: the keyboard interrupt only queues raw scancodes, so let the
+        // async decoding task run before looking for input.
+        task::poll();
         if let Some(byte) = input::pop() {
             return byte;
         }

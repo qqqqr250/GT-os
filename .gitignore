@@ -10,6 +10,7 @@
 /examples/paging/target
 /examples/heap-allocation/target
 /examples/allocator-designs/target
+/examples/async-await/target
 /serial.log
 /*.ppm
 /*.png

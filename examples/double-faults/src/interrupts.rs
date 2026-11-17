@@ -12,12 +12,14 @@
 //!
 //! As a forward-looking hook, [`init`] also brings forward post-07's hardware
 //! interrupts: it remaps the 8259 PIC, programs the PIT and unmasks the timer, so
-//! [`ticks`] advances. The full post-07 treatment is
+//! [`ticks`] advances, and installs a keyboard handler that feeds post-12's async
+//! scancode queue. The full post-07 treatment is
 //! [`examples/hardware-interrupts`].
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use spin::Mutex;
+use x86_64::instructions::port::Port;
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
@@ -35,6 +37,12 @@ static EXCEPTION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// The vector the timer (IRQ0) is remapped to.
 pub const TIMER_VECTOR: u8 = pic::PIC1_OFFSET;
+
+/// The vector the keyboard (IRQ1) is remapped to.
+///
+/// Post-12's async keyboard: the handler pushes the raw scancode into the task
+/// module's lock-free queue (see [`crate::task::keyboard`]).
+pub const KEYBOARD_VECTOR: u8 = pic::PIC1_OFFSET + 1;
 
 /// Number of timer interrupts since boot.
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -130,6 +138,7 @@ pub fn init() {
             .set_handler_fn(general_protection_fault);
         idt.page_fault.set_handler_fn(page_fault);
         idt[TIMER_VECTOR].set_handler_fn(timer_interrupt);
+        idt[KEYBOARD_VECTOR].set_handler_fn(keyboard_interrupt);
 
         // SAFETY: `IDT` lives in a `static` and is never moved, so the address the
         // CPU caches in the IDTR stays valid for the life of the kernel. `load`
@@ -204,6 +213,18 @@ extern "x86-interrupt" fn divide_error(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     pic::end_of_interrupt(0);
+}
+
+/// The keyboard (IRQ1): read the scancode and hand it to the async decoder.
+///
+/// Post-12 moved the decoding out of the handler: this only pushes the raw
+/// scancode into [`crate::task::keyboard`]'s lock-free queue and wakes the task
+/// that decodes it.
+extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
+    // SAFETY: port 0x60 is the PS/2 data port.
+    let scancode = unsafe { Port::<u8>::new(0x60).read() };
+    crate::task::keyboard::add_scancode(scancode);
+    pic::end_of_interrupt(1);
 }
 
 extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
