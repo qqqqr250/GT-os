@@ -1,0 +1,59 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "RustOS kernel: freestanding x86_64 kernel"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The kernel is its own workspace: it only builds for `x86_64-unknown-none`, and
+# the host workspace at the repository root deliberately excludes it (see the
+# root `Cargo.toml`). That keeps `cargo clippy --workspace --all-targets` at the
+# root from trying to compile this package for the host.
+[workspace]
+resolver = "3"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# The kernel logic lives in the library so the in-QEMU tests can link against it;
+# `src/main.rs` is a thin binary that owns the bootloader entry point.
+[lib]
+name = "kernel"
+path = "src/lib.rs"
+
+# This binary is the freestanding kernel; it has no host-side tests.
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+# In-QEMU integration tests (see the README's *Testing* section).
+[[test]]
+name = "basic_boot"
+
+[[test]]
+name = "should_panic"
+harness = false
+
+# post-06's in-QEMU stack-overflow test. Like `should_panic` it runs without the
+# normal harness, because a double fault cannot return: it passes or fails by
+# exiting QEMU.
+[[test]]
+name = "stack_overflow"
+harness = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bootloader_api = "0.11.12"
+x86_64 = "0.15.2"
+spin = "0.9.8"
+linked_list_allocator = "0.10.5"

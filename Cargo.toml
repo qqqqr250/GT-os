@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+# The kernel is a freestanding `no_std` package that only builds for
+# `x86_64-unknown-none`, so it is deliberately *not* a member of this (host)
+# workspace: it has its own workspace in `kernel/Cargo.toml`. Keeping it out is
+# what lets `cargo clippy --workspace --all-targets` (which builds for the host)
+# succeed; the artifact dependency below still builds the kernel for the
+# bare-metal target. Run its tests with `cargo xtest`.
+exclude = ["kernel"]
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[package]
+name = "rustos"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "RustOS: a small x86_64 operating system written from scratch in Rust"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[build-dependencies]
+kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+bootloader = "0.11.12"
+
+# The kernel is a freestanding binary: it must not try to unwind.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

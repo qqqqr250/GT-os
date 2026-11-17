@@ -1,0 +1,20 @@
+/target
+/kernel/target
+/runner/target
+/examples/minimal/target
+/examples/vga-text/target
+/examples/testing/target
+/examples/cpu-exceptions/target
+/examples/double-faults/target
+/examples/hardware-interrupts/target
+/examples/paging/target
+/examples/heap-allocation/target
+/serial.log
+/*.ppm
+/*.png
+# Built disk images and scratch capture files: regenerate them with the
+# scripts, do not version them.
+/*.iso
+/*.vdi
+/*.img
+/audio.wav

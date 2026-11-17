@@ -1,0 +1,52 @@
+[package]
+name = "rustos-testing"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "blog_os post-04, done properly: a minimal bare-metal kernel with an in-QEMU test framework"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone on purpose: this teaching crate must not join the RustOS workspace,
+# so it can be built and tested on its own (its `cargo test` boots QEMU, see the
+# crate README).
+[workspace]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# The library holds the kernel and the test framework. Unlike the post-02 and
+# post-03 examples it is *always* `no_std`: every test runs inside QEMU through
+# the custom test framework, not on the host.
+[lib]
+name = "rustos_testing"
+path = "src/lib.rs"
+
+# The bootable kernel binary, built for `x86_64-unknown-none`.
+[[bin]]
+name = "rustos-testing"
+path = "src/main.rs"
+test = false
+bench = false
+
+# In-QEMU integration tests (run with `scripts\testing.ps1 -Test`).
+[[test]]
+name = "basic_boot"
+
+[[test]]
+name = "should_panic"
+harness = false
+
+[dependencies]
+bootloader_api = "0.11.12"
+
+# The kernel is freestanding: it must not try to unwind.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

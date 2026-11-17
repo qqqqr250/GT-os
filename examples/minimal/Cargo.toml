@@ -1,0 +1,68 @@
+[package]
+name = "rustos-minimal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "blog_os post-02, done properly: a minimal bare-metal kernel with a safe VGA text console (post-03's writer lives in examples/vga-text)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone on purpose: this teaching crate must not join the RustOS workspace,
+# so it can be built and tested on its own (its `cargo test` runs on the host,
+# see the crate README).
+[workspace]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# The library holds the console; it builds `no_std` for the kernel and as a
+# normal `std` crate for `cargo test`.
+[lib]
+name = "rustos_minimal"
+path = "src/lib.rs"
+
+# The bootable kernel binary, built for `x86_64-unknown-none`.
+[[bin]]
+name = "rustos-minimal"
+path = "src/main.rs"
+test = false
+bench = false
+
+# The in-QEMU integration test (`tests/qemu.rs`, run with
+# `scripts\minimal.ps1 -Test` or `cargo qtest`). It is gated behind the
+# `qemu-test` feature so a plain host `cargo test` — and
+# `cargo clippy --all-targets` — never tries to build a bare-metal test binary.
+[[test]]
+name = "qemu"
+harness = false
+required-features = ["qemu-test"]
+
+# post-06's in-QEMU stack-overflow test (`tests/stack_overflow.rs`). It also runs
+# without the normal harness, because a double fault cannot return: it passes or
+# fails by exiting QEMU. Gated like `qemu` so a host `cargo test` never builds it.
+[[test]]
+name = "stack_overflow"
+harness = false
+required-features = ["qemu-test"]
+
+[features]
+# Enables the in-QEMU test hooks in the library and the `qemu` test target. It
+# pulls in `x86_64` for the breakpoint test's interrupt descriptor table.
+qemu-test = ["dep:x86_64"]
+
+[dependencies]
+bootloader_api = "0.11.12"
+spin = "0.9.8"
+# Only needed by the in-QEMU breakpoint test, so the host build never pulls it in.
+x86_64 = { version = "0.15.2", optional = true }
+
+# The kernel is freestanding: it must not try to unwind.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

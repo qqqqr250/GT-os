@@ -1,0 +1,72 @@
+[package]
+name = "rustos-double-faults"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "blog_os post-06, done properly: a minimal bare-metal kernel that catches double faults on a dedicated IST stack"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone on purpose: this teaching crate must not join the RustOS workspace,
+# so it can be built and tested on its own (its `cargo test` boots QEMU, see the
+# crate README).
+[workspace]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# The library holds the kernel, the GDT/TSS and the IDT. Like the post-04 and
+# post-05 examples it is *always* `no_std`: every test runs inside QEMU through
+# the custom test framework, not on the host.
+[lib]
+name = "rustos_double_faults"
+path = "src/lib.rs"
+
+# The bootable kernel binary, built for `x86_64-unknown-none`.
+[[bin]]
+name = "rustos-double-faults"
+path = "src/main.rs"
+test = false
+bench = false
+
+# The in-QEMU integration test (`tests/stack_overflow.rs`, run with
+# `scripts\double-faults.ps1 -Test` or `cargo qtest`). It runs without the
+# normal harness because a double fault cannot return: it passes or fails by
+# exiting QEMU.
+[[test]]
+name = "stack_overflow"
+harness = false
+
+# The post-07 hardware-interrupt hook: the PIC/PIT setup in `interrupts::init`
+# drives a timer, and this test asserts the tick count advances.
+[[test]]
+name = "timer"
+
+# The post-08 paging hook: the `memory` module's mapper, table walk and frame
+# allocator are exercised through the crate's public API.
+[[test]]
+name = "paging"
+
+# The post-10 heap hook: the `allocator` module's heap is mapped through the
+# paging layer and exercised through the crate's public API.
+[[test]]
+name = "heap_allocation"
+
+[dependencies]
+bootloader_api = "0.11.12"
+# The heap itself: a linked-list allocator behind a spin lock, the same crate the
+# real kernel uses.
+linked_list_allocator = "0.10.5"
+spin = "0.9.8"
+x86_64 = "0.15.2"
+
+# The kernel is freestanding: it must not try to unwind.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

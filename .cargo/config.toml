@@ -1,0 +1,16 @@
+[unstable]
+# Lets the root crate depend on the kernel binary as a build artifact
+# (nightly-only Cargo feature, see the README).
+bindeps = true
+
+# `cargo test` builds the kernel's test binaries for the bare-metal target and
+# hands each one to this runner, which wraps it in a bootable disk image and
+# boots it in QEMU (see kernel/tests and the README's *Testing* section).
+[target.'cfg(target_os = "none")']
+runner = "cargo run --quiet --manifest-path ../runner/Cargo.toml --"
+
+[alias]
+# `cargo xtest` == run the kernel's in-QEMU test suite. The kernel is its own
+# workspace (see kernel/Cargo.toml), so it is addressed by manifest path rather
+# than with `-p`.
+xtest = "test --manifest-path kernel/Cargo.toml --target x86_64-unknown-none"

@@ -1,0 +1,15 @@
+# Cargo reads `.cargo/config.toml` from the current directory upwards, so the
+# in-QEMU tests must be run from *this* crate's directory (see
+# `scripts\hardware-interrupts.ps1 -Test`). The runner path is relative to the
+# package directory, which is where Cargo invokes the runner.
+#
+# The target is *not* set with `build.target` on purpose: the runner is invoked as
+# `cargo run`, and that nested Cargo would inherit `build.target` and try to build
+# the host-side runner for `x86_64-unknown-none`. The `qtest` alias passes
+# `--target` only to the outer command, exactly like the kernel's `xtest`.
+[target.'cfg(target_os = "none")']
+runner = "cargo run --quiet --manifest-path ../../runner/Cargo.toml --"
+
+[alias]
+# `cargo qtest` == run this crate's in-QEMU test suite.
+qtest = "test --target x86_64-unknown-none"
