@@ -1,12 +1,10 @@
 # Networking
 
-GTos speaks IPv4 on either of two emulated NICs: QEMU's RTL8139
-(`-nic user,model=rtl8139`, passed by the launcher and test scripts) or the
-Intel 82540EM that `VirtualBox` provides with `--nic-type 82540EM` (attached by
-`scripts\virtualbox.ps1`). `net` prints which one was found. At boot the kernel
-runs a **DHCP** client, so it takes whatever address the network hands out; if
-no server answers within half a second it falls back to the fixed defaults of
-the QEMU/`VirtualBox` NAT network:
+GTos speaks IPv4 on the emulated **Intel 82540EM** NIC that VirtualBox provides
+with `--nic1 nat --nic-type1 82540EM` (attached by `scripts\virtualbox.ps1`).
+`net` prints which adapter was found. At boot the kernel runs a **DHCP** client,
+so it takes whatever address the network hands out; if no server answers within
+half a second it falls back to the fixed defaults of VirtualBox's NAT network:
 
 | Setting | Value |
 | --- | --- |
@@ -15,7 +13,8 @@ the QEMU/`VirtualBox` NAT network:
 | DNS proxy | `10.0.2.3` |
 | MAC | `52:54:00:12:34:56` |
 
-The stack is split across two modules:
+The kernel also recognises the RTL8139, but the VirtualBox VM uses the E1000
+driver. The stack is split across two modules:
 
 - `kernel/src/pci.rs` scans PCI bus 0 through the `0xCF8`/`0xCFC` configuration
   ports, finds the adapter, and enables its I/O, memory-space and bus-master bits.
@@ -35,7 +34,7 @@ Try it from the shell:
 
 ```
 gtos> net
-adapter: RTL8139, I/O 0xc000, IRQ 11
+adapter: Intel E1000, MMIO 0xf0000000, IRQ 11
 address: 10.0.2.15
 mac:     52:54:00:12:34:56
 gateway: 10.0.2.2
@@ -57,10 +56,10 @@ HTTP/1.1 200 OK
 ```
 
 `ping`, `dns` and `http` reach beyond the gateway only when the host has
-connectivity; the gateway itself always answers because SLIRP implements the
-virtual host locally. Off-subnet traffic is sent to the gateway's MAC while
-keeping the real destination in the IP header, because SLIRP only answers ARP for
-the addresses it owns.
+connectivity; the gateway itself always answers because VirtualBox's NAT engine
+implements the virtual host locally. Off-subnet traffic is sent to the gateway's
+MAC while keeping the real destination in the IP header, because the NAT engine
+only answers ARP for the addresses it owns.
 
 The Windows XP-style **Browser** window opens from the desktop icon or with
 **F1**. It has an editable address bar: type a URL, press **Enter** (or click
@@ -101,12 +100,10 @@ sites show the notice described above). External CSS,
 images and scripts are not fetched separately, so most pages keep their default
 styling rather than the site's own design.
 
-## Testing the network
+## Checking the network by hand
 
-The smoke test always checks the adapter and pings the gateway. Pass `-Network`
-to also resolve a name and fetch pages over HTTP and HTTPS, which needs the host
-to have internet access:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Network
-```
+There is no automated network check. In the VM, run `net` to see the adapter and
+address, then `ping 10.0.2.2` to confirm the NAT gateway answers. With host
+internet access, `dns example.com` and `http http://example.com/` exercise the
+resolver and HTTP client; the **F1** Browser window exercises the same stack
+from the GUI.

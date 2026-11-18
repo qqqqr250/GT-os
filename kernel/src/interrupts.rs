@@ -31,15 +31,15 @@ const DOT_INTERVAL: u64 = 10;
 
 /// Whether the timer handler prints a dot to COM1 every [`DOT_INTERVAL`] ticks.
 ///
-/// Off by default so a normal boot stays quiet. The in-QEMU deadlock test turns
-/// it on so the handler really does print through the serial lock while the main
+/// Off by default so a normal boot stays quiet. It can be turned on to verify
+/// that the handler really does print through the serial lock while the main
 /// thread prints too — the case the `without_interrupts` fix in `serial` covers.
 static TIMER_DOTS: AtomicBool = AtomicBool::new(false);
 
 /// Number of breakpoint (`#BP`) exceptions handled since boot.
 ///
 /// A breakpoint is recoverable, so this counts how many times the handler ran
-/// and returned; the in-QEMU test asserts it went up after an `int3`.
+/// and returned; the count goes up after an `int3`.
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 
 static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());

@@ -1,9 +1,9 @@
 //! ATA PIO disk driver.
 //!
 //! Talks to the drives on the primary IDE channel (I/O base `0x1F0`) using
-//! 28-bit LBA and programmed I/O: no DMA, no interrupts. QEMU attaches the
-//! boot disk as the primary master and the `GTos` data disk as the primary
-//! slave. Both [`read_sectors`] and [`write_sectors`] take a drive index of
+//! 28-bit LBA and programmed I/O: no DMA, no interrupts. The boot disk is the
+//! primary master and the `GTos` data disk is the primary slave. Both
+//! [`read_sectors`] and [`write_sectors`] take a drive index of
 //! zero (master) or one (slave). The transfer is polled, which matches the
 //! rest of the kernel and keeps the driver usable before (and without) the
 //! interrupt controller.

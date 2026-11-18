@@ -4,8 +4,6 @@ A small, bootable x86_64 operating system written from scratch in Rust. No
 Linux, no `std`, no libc: the kernel owns the machine from the moment the
 bootloader hands over the CPU until `shutdown`.
 
-![GTos running in QEMU](../docs/screenshot.png)
-
 It boots on legacy BIOS **and** UEFI from the same kernel binary, draws a
 framebuffer text console with its own 8x8 font renderer, mirrors everything to
 COM1, sets up a heap, an IDT, the 8259 PIC and the PIT, and serves an
@@ -31,12 +29,11 @@ interactive shell over the PS/2 keyboard or a serial line.
   `linked_list_allocator` fallback) over the top of the largest usable region,
   capped at 32 MiB, reached through the bootloader's physical-memory window
   (post-10 builds the heap and its `#[global_allocator]`; post-11 supplies the
-  allocator's own design, and both are exercised in-QEMU by `basic_boot`).
+  allocator's own design).
 - **Paging** – the kernel owns its page tables: `memory` reads `CR3`, walks the
   four-level table both by hand and through an `OffsetPageTable`, and can map a
   page from a frame allocator over the bootloader's memory map. `usermode` builds
-  the ring-3 window on the same tables, and the in-QEMU tests exercise the paging
-  API directly (post-08).
+  the ring-3 window on the same tables (post-08).
 - **Interrupts** – own IDT (with CPU-exception reporters), 8259A remap to
   vectors 0x20–0x2F, PIT at 100 Hz, IRQ1 keyboard, IRQ4 COM1. The double-fault
   handler runs on its own interrupt stack (a GDT + TSS + IST), so a kernel stack
@@ -62,12 +59,12 @@ interactive shell over the PS/2 keyboard or a serial line.
   `logo`, `about`, `net`, `dhcp`, `ping`, `dns`, `http`, `beep`, `tone`, `disks`,
   `ls`, `cat`, `write`, `rm`, `play`, `format`, `run`, `pkg`, `panic`, `reboot`,
   `shutdown`.
-- **Networking** – an RTL8139 driver plus a hand-written IPv4 stack (ARP, ICMP,
-  UDP, DNS and a synchronous TCP client) with a DHCP client, so the OS can
-  `ping`, resolve host names and fetch web pages over HTTP. See
-  [Networking](06-networking.md).
+- **Networking** – drivers for the emulated Intel 82540EM and RTL8139 NICs, plus
+  a hand-written IPv4 stack (ARP, ICMP, UDP, DNS and a synchronous TCP client)
+  with a DHCP client, so the OS can `ping`, resolve host names and fetch web
+  pages over HTTP. See [Networking](06-networking.md).
 - **Sound** – an AC'97 driver that plays PCM WAV files and synthesised tones
-  through QEMU's audio backend. See [Audio](07-audio.md).
+  through the emulated audio device. See [Audio](07-audio.md).
 - **Disks** – an ATA PIO driver and a read/write FAT16 filesystem, so the OS can
   list, create, read, overwrite and delete files on a real IDE disk. See
   [Disks and the FAT16 filesystem](08-disks.md).
@@ -75,7 +72,6 @@ interactive shell over the PS/2 keyboard or a serial line.
   dedicated ring-0 stack, a private page-table window and an `int 0x80` system
   call gate, so flat binaries run with hardware isolation. See
   [User mode (ring 3)](05-user-mode.md).
-- **Tests** – an in-QEMU `cargo test` framework (`cargo xtest`) runs unit and
-  integration tests inside the kernel itself, and an end-to-end smoke test boots
-  the image, drives the shell over a TCP-attached COM1 and asserts on the
-  transcript, for both BIOS and UEFI. See [Testing](11-testing.md).
+- **Manual verification** – there is no automated test suite; boot the image in
+  VirtualBox and exercise the desktop, shell, network and audio by hand. See
+  [Verifying GTos](11-testing.md).

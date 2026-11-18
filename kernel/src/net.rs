@@ -1,9 +1,8 @@
 //! A small IPv4 network stack.
 //!
-//! Implements the RTL8139 NIC (the adapter QEMU attaches for
-//! `-nic user,model=rtl8139`), Ethernet, ARP, IPv4, ICMP, UDP, a DNS resolver
-//! and a synchronous TCP client, which together are enough to `ping`, resolve
-//! host names and fetch web pages over HTTP.
+//! Implements the RTL8139 and Intel 8254x NICs, Ethernet, ARP, IPv4, ICMP, UDP,
+//! a DNS resolver and a synchronous TCP client, which together are enough to
+//! `ping`, resolve host names and fetch web pages over HTTP.
 //!
 //! The driver is polled from the shell rather than interrupt-driven, so the
 //! whole stack stays single-threaded. DMA buffers are carved out of the kernel
@@ -28,7 +27,7 @@ use crate::{interrupts, pci};
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// MAC address programmed into the adapter (QEMU's default guest NIC).
+/// MAC address programmed into the adapter.
 pub const MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
 /// The runtime IPv4 configuration.
@@ -48,10 +47,9 @@ pub struct Address {
 
 /// The address configuration in use.
 ///
-/// It starts at QEMU's user-mode ("SLIRP") defaults so the stack works even
-/// without a DHCP server, and [`dhcp`] replaces it with whatever a server hands
-/// out. SLIRP itself answers DHCP, so a normal boot ends up on the same
-/// addresses through the real protocol.
+/// It starts at common user-mode NAT defaults (10.0.2.15/24, gateway 10.0.2.2)
+/// so the stack works even without a DHCP server, and [`dhcp`] replaces it with
+/// whatever a server hands out.
 static ADDRESS: Mutex<Address> = Mutex::new(Address {
     ip: [10, 0, 2, 15],
     netmask: [255, 255, 255, 0],
@@ -216,7 +214,7 @@ static ARP_CACHE: Mutex<Vec<([u8; 4], [u8; 6])>> = Mutex::new(Vec::new());
 
 /// Probes for a supported NIC and brings it up.
 ///
-/// Tries QEMU's RTL8139 first, then the Intel 8254x family `VirtualBox` emulates.
+/// Tries the RTL8139 first, then the Intel 8254x family.
 /// Returns `false` when neither is present. `physical_memory_offset` is
 /// `BootInfo::physical_memory_offset`, used both for DMA addresses and to reach
 /// the E1000's MMIO registers.
@@ -274,7 +272,7 @@ fn e1000_init(device: pci::Device, physical_memory_offset: u64) -> Option<Nic> {
         return None;
     }
     let mmio = (physical_memory_offset + u64::from(phys)) as usize;
-    let dma = alloc_dma(E1000_DMA_BYTES);
+    let dma = alloc_dma(E1000_DMA_BYTES)?;
 
     // SAFETY: `mmio` is the adapter's MMIO BAR, mapped by the bootloader as
     // part of the physical-memory window; the DMA region is leaked and fixed.
@@ -351,7 +349,7 @@ fn e1000_init(device: pci::Device, physical_memory_offset: u64) -> Option<Nic> {
     })
 }
 
-/// Brings up QEMU's RTL8139.
+/// Brings up an RTL8139 adapter.
 fn rtl8139_init(device: pci::Device, physical_memory_offset: u64) -> bool {
     pci::enable(&device);
 
@@ -360,7 +358,9 @@ fn rtl8139_init(device: pci::Device, physical_memory_offset: u64) -> bool {
         return false;
     }
 
-    let dma = alloc_dma(DMA_BYTES);
+    let Some(dma) = alloc_dma(DMA_BYTES) else {
+        return false;
+    };
 
     // SAFETY: `io` is the adapter's I/O BAR; the DMA region is leaked for the
     // lifetime of the kernel and stays at a fixed physical address.
@@ -436,15 +436,20 @@ pub fn adapter() -> Option<AdapterInfo> {
 }
 
 /// Leaks a zeroed, 16-byte-aligned DMA region from the kernel heap.
-fn alloc_dma(size: usize) -> &'static mut [u8] {
+///
+/// Returns `None` instead of panicking when the heap cannot satisfy the request:
+/// a driver that cannot get DMA buffers should be skipped, not take down boot.
+fn alloc_dma(size: usize) -> Option<&'static mut [u8]> {
     use alloc::alloc::{Layout, alloc_zeroed};
 
-    let layout = Layout::from_size_align(size, 16).expect("valid DMA layout");
+    let layout = Layout::from_size_align(size, 16).ok()?;
     // SAFETY: the layout has a non-zero size and the allocation is never freed.
     let pointer = unsafe { alloc_zeroed(layout) };
-    assert!(!pointer.is_null(), "network DMA allocation failed");
+    if pointer.is_null() {
+        return None;
+    }
     // SAFETY: `pointer` is valid for `size` bytes and leaked for good.
-    unsafe { core::slice::from_raw_parts_mut(pointer, size) }
+    Some(unsafe { core::slice::from_raw_parts_mut(pointer, size) })
 }
 
 /// Converts a heap virtual address into the physical address for DMA.
@@ -549,8 +554,8 @@ fn rtl8139_transmit(nic: &mut Nic, frame: &[u8]) -> bool {
         return false;
     }
 
-    // QEMU always transmits from its own round-robin descriptor, so the
-    // descriptors must be used in order 0, 1, 2, 3, 0, ...
+    // The RTL8139 transmits from its round-robin descriptors, so they must be
+    // used in order 0, 1, 2, 3, 0, ...
     let index = nic.tx_next % TX_COUNT;
     let base = RX_TOTAL + index * TX_BUF;
     nic.dma[base..base + frame.len()].copy_from_slice(frame);
@@ -834,7 +839,7 @@ fn parse_ipv4(frame: &[u8]) -> Option<IpPacket<'_>> {
 }
 
 /// The next hop for `destination`: the host itself when it is on the local
-/// subnet, otherwise the default gateway. QEMU's SLIRP only answers ARP for
+/// subnet, otherwise the default gateway. A NAT network only answers ARP for
 /// the addresses it owns, so off-subnet traffic must be sent to the gateway's
 /// MAC while keeping the real destination in the IP header.
 fn next_hop(destination: [u8; 4]) -> [u8; 4] {
@@ -1014,7 +1019,7 @@ fn parse_dns_answer(message: &[u8]) -> Option<[u8; 4]> {
     None
 }
 
-/// Resolves a host name through SLIRP's DNS proxy.
+/// Resolves a host name through the configured DNS server.
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
     let server = dns();
     let query = build_dns_query(name);
@@ -1639,7 +1644,8 @@ pub fn resolve_url(base: &str, location: &str) -> Option<String> {
 /// Resolves a `Location` header against the URL that produced it.
 fn absolute_url(base: &Url, location: &str) -> String {
     let location = location.trim();
-    if location.starts_with("http://") || location.starts_with("https://") {
+    let lower = location.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
         return location.to_string();
     }
     if let Some(rest) = location.strip_prefix("//") {
@@ -1657,7 +1663,13 @@ fn absolute_url(base: &Url, location: &str) -> String {
     if location.starts_with('/') {
         return format!("{}://{}{}", base.scheme, base.authority(), location);
     }
+    // RFC 3986: a relative reference is resolved against the *directory* of
+    // the base path. "/page.html" has no directory component beyond "/", so
+    // appending "/" here would produce an invalid "//target" path.
     let directory = base.path.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+    if directory.is_empty() {
+        return format!("{}://{}/{}", base.scheme, base.authority(), location);
+    }
     format!(
         "{}://{}{}/{}",
         base.scheme,

@@ -287,6 +287,12 @@ fn decode_entity(entity: &str) -> Option<String> {
 fn parse_color(value: &str) -> Option<Color> {
     let value = value.trim();
     if let Some(hex) = value.strip_prefix('#') {
+        // The byte slicing below is only sound for ASCII, and a non-ASCII
+        // character can never be a hex digit anyway. Reject it up front so a
+        // value like `#1é456` cannot panic at a non-char boundary.
+        if !hex.is_ascii() {
+            return None;
+        }
         if hex.len() == 3 {
             let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
             let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
@@ -676,7 +682,11 @@ fn tokenize(html: &str) -> Vec<Token> {
             continue;
         }
 
-        let attrs = parse_attrs(&content[name_end + (content.len() - content_lower.len())..]);
+        // `name_end` is relative to `body`, i.e. after any whitespace that
+        // followed `<`. `content_lower` is the same length as `content`, so
+        // subtracting it always yielded 0 and re-fed the tag name (and the
+        // leading whitespace) into the attribute parser.
+        let attrs = parse_attrs(&content[name_end + (content.len() - trimmed.len())..]);
         let self_closing = content_lower.trim_end().ends_with('/');
         tokens.push(Token::Open {
             name: name.clone(),
@@ -1389,6 +1399,10 @@ struct Flow {
     width: usize,
     /// Href of the `<a>` currently being laid out, if any.
     link: Option<String>,
+    /// Whitespace at the end of the previous text node. It must collapse into
+    /// a single space before the next run on this line, even when an inline
+    /// element (such as `<span>`) sits between the two text nodes.
+    pending_space: bool,
 }
 
 impl Flow {
@@ -1399,6 +1413,7 @@ impl Flow {
             used: 0,
             width: width.max(8),
             link: None,
+            pending_space: false,
         }
     }
 
@@ -1415,14 +1430,63 @@ impl Flow {
             self.lines.push(line);
         }
         self.used = 0;
+        // A block boundary (or a forced wrap) also ends any pending space.
+        self.pending_space = false;
     }
 
     fn push_text(&mut self, text: &str, style: &Style) {
-        let collapsed = if style.pre {
-            text.to_string()
-        } else {
-            collapse_whitespace(text)
-        };
+        if style.pre {
+            // `white-space: pre` must keep every space and newline. The normal
+            // path below collapses runs of whitespace into single separators,
+            // so lay out preformatted text as whole lines wrapped at character
+            // boundaries instead.
+            let scale = style.scale();
+            let char_width = 8 * scale;
+            for paragraph in text.split('\n') {
+                let mut remaining = paragraph;
+                while !remaining.is_empty() {
+                    let capacity = (self.width.saturating_sub(self.used) / char_width).max(1);
+                    let mut chars = 0usize;
+                    let mut cut = remaining.len();
+                    for (index, _) in remaining.char_indices() {
+                        if chars == capacity {
+                            cut = index;
+                            break;
+                        }
+                        chars += 1;
+                    }
+                    // A single glyph wider than the viewport still has to be
+                    // emitted, otherwise the layout loop would never advance.
+                    if cut == 0 {
+                        cut = remaining
+                            .char_indices()
+                            .nth(1)
+                            .map_or(remaining.len(), |(i, _)| i);
+                        chars = 1;
+                    }
+                    self.push_span(&remaining[..cut], style, scale);
+                    self.used = self.used.saturating_add(chars.saturating_mul(char_width));
+                    remaining = &remaining[cut..];
+                    if !remaining.is_empty() {
+                        self.flush();
+                    }
+                }
+                self.flush();
+            }
+            self.pending_space = false;
+            return;
+        }
+        let leading_space =
+            self.pending_space || text.chars().next().is_some_and(char::is_whitespace);
+        let trailing_space = text.chars().last().is_some_and(char::is_whitespace);
+        self.pending_space = false;
+        let mut collapsed = collapse_whitespace(text);
+        // Re-instate one leading space; the word loop below only inserts a
+        // separator when `used > 0`, so this never creates a leading gap at
+        // the start of a line.
+        if leading_space && !collapsed.is_empty() {
+            collapsed.insert(0, ' ');
+        }
         let scale = style.scale();
         let char_width = 8 * scale;
         for paragraph in collapsed.split('\n') {
@@ -1454,13 +1518,14 @@ impl Flow {
                     word = tail;
                 }
             }
-            if style.pre {
-                self.flush();
-            }
         }
+        self.pending_space = trailing_space;
     }
 
     fn push_span(&mut self, text: &str, style: &Style, scale: usize) {
+        // An explicit run (including a manually inserted space, e.g. a list
+        // marker separator) consumes any pending whitespace.
+        self.pending_space = false;
         let span_style = SpanStyle {
             color: style.color,
             bold: style.bold,
@@ -1469,7 +1534,9 @@ impl Flow {
             scale,
         };
         if let Some(last) = self.current.spans.last_mut() {
-            if last.style == span_style {
+            // Merging runs with different link targets would silently retarget
+            // one of two adjacent anchors (or drop a link entirely).
+            if last.style == span_style && last.link == self.link {
                 last.text.push_str(text);
                 return;
             }
@@ -1819,5 +1886,58 @@ mod tests {
         assert!(first.spans[0].text.starts_with("1. "));
         assert_eq!(pre.kind, LineKind::Pre);
         assert!(pre.background.is_some());
+    }
+
+    #[test_case]
+    fn preformatted_text_keeps_its_spaces() {
+        let page = render("<pre>  alpha   beta</pre>", 80);
+        let line = line_with(&page, "alpha");
+        assert_eq!(line.kind, LineKind::Pre);
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.text.contains("  alpha   beta"))
+        );
+    }
+
+    #[test_case]
+    fn non_ascii_hex_colour_is_rejected_without_panicking() {
+        // `é` is two bytes, so slicing `#1é456` at byte offsets 0..2 would
+        // split a character and panic.
+        let page = render("<style>p { color: #1\u{e9}456; }</style><p>text</p>", 40);
+        let line = line_with(&page, "text");
+        assert_eq!(line.spans[0].style.color, Color(0x20_20_20));
+    }
+
+    #[test_case]
+    fn adjacent_links_keep_their_own_targets() {
+        let page = render("<a href=\"/one\">one</a><a href=\"/two\">two</a>", 80);
+        let spans: alloc::vec::Vec<&super::Span> = page
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .collect();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "one");
+        assert_eq!(spans[0].link.as_deref(), Some("/one"));
+        assert!(spans[1].text.contains("two"));
+        assert_eq!(spans[1].link.as_deref(), Some("/two"));
+    }
+
+    #[test_case]
+    fn spacing_across_inline_elements_is_preserved() {
+        let page = render("<p>before <span>inside</span> after</p>", 80);
+        assert_eq!(page_text(&page), "before inside after");
+    }
+
+    #[test_case]
+    fn whitespace_after_angle_bracket_does_not_become_an_attribute() {
+        let dom = super::Dom::parse("< a href=\"/x\">hello</a>");
+        let id = dom
+            .elements()
+            .find(|&id| dom.tag(id) == "a")
+            .expect("anchor was not parsed");
+        assert_eq!(dom.attr(id, "href"), Some("/x"));
+        assert_eq!(dom.attr(id, "a"), None);
     }
 }

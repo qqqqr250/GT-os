@@ -4,10 +4,21 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::input;
 
-/// True while either shift key is held down.
-static SHIFT: AtomicBool = AtomicBool::new(false);
+/// The two shift keys are tracked separately: releasing one must not clear the
+/// other when both are held down.
+static LEFT_SHIFT_HELD: AtomicBool = AtomicBool::new(false);
+static RIGHT_SHIFT_HELD: AtomicBool = AtomicBool::new(false);
+/// The two Ctrl keys, likewise tracked separately (the right one is extended).
+static LEFT_CTRL: AtomicBool = AtomicBool::new(false);
+static RIGHT_CTRL: AtomicBool = AtomicBool::new(false);
 /// True after the caps-lock key has been toggled an odd number of times.
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
+/// Guards against auto-repeat toggling caps lock on every repeated make code.
+static CAPS_HELD: AtomicBool = AtomicBool::new(false);
+/// Guards against auto-repeat re-triggering the special one-shot keys.
+static WINDOWS_HELD: AtomicBool = AtomicBool::new(false);
+static BROWSER_HELD: AtomicBool = AtomicBool::new(false);
+static FILES_HELD: AtomicBool = AtomicBool::new(false);
 /// Set when the previous scancode was the 0xE0 "extended" prefix.
 static EXTENDED: AtomicBool = AtomicBool::new(false);
 
@@ -39,12 +50,21 @@ pub fn handle_scancode(scancode: u8) {
     }
     if EXTENDED.swap(false, Ordering::Relaxed) {
         // Extended keys. The arrow and paging keys are delivered to the desktop
-        // as high control codes; everything else (keypad enter, right
-        // ctrl/alt, ...) is still ignored.
-        if scancode & 0x80 != 0 {
+        // as high control codes; right Ctrl is a modifier and everything else
+        // (keypad enter, right Alt, ...) is still ignored.
+        let released = scancode & 0x80 != 0;
+        let code = scancode & 0x7f;
+        if code == 0x1d {
+            RIGHT_CTRL.store(!released, Ordering::Relaxed);
+            return;
+        }
+        if released {
+            if code == 0x5b || code == 0x5c {
+                WINDOWS_HELD.store(false, Ordering::Relaxed);
+            }
             return; // key release
         }
-        let key = match scancode {
+        let key = match code {
             0x48 => Some(input::KEY_UP),
             0x50 => Some(input::KEY_DOWN),
             0x4b => Some(input::KEY_LEFT),
@@ -58,6 +78,9 @@ pub fn handle_scancode(scancode: u8) {
             0x5b | 0x5c => Some(input::KEY_WINDOWS),
             _ => None,
         };
+        if key == Some(input::KEY_WINDOWS) && WINDOWS_HELD.swap(true, Ordering::Relaxed) {
+            return; // auto-repeat must not toggle the Start menu again
+        }
         if let Some(key) = key {
             input::push(key);
         }
@@ -68,15 +91,35 @@ pub fn handle_scancode(scancode: u8) {
     let code = scancode & 0x7f;
 
     match code {
-        LEFT_SHIFT | RIGHT_SHIFT => SHIFT.store(!released, Ordering::Relaxed),
+        LEFT_SHIFT | RIGHT_SHIFT => {
+            let held = !released;
+            if code == LEFT_SHIFT {
+                LEFT_SHIFT_HELD.store(held, Ordering::Relaxed);
+            } else {
+                RIGHT_SHIFT_HELD.store(held, Ordering::Relaxed);
+            }
+        }
+        0x1d => LEFT_CTRL.store(!released, Ordering::Relaxed),
         CAPS_LOCK_KEY => {
-            if !released {
+            if released {
+                CAPS_HELD.store(false, Ordering::Relaxed);
+            } else if !CAPS_HELD.swap(true, Ordering::Relaxed) {
                 CAPS_LOCK.fetch_xor(true, Ordering::Relaxed);
             }
         }
         // F1 opens the Browser, F2 opens the file manager.
-        0x3b if !released => input::push(input::KEY_BROWSER),
-        0x3c if !released => input::push(input::KEY_FILES),
+        0x3b if !released => {
+            if !BROWSER_HELD.swap(true, Ordering::Relaxed) {
+                input::push(input::KEY_BROWSER);
+            }
+        }
+        0x3b => BROWSER_HELD.store(false, Ordering::Relaxed),
+        0x3c if !released => {
+            if !FILES_HELD.swap(true, Ordering::Relaxed) {
+                input::push(input::KEY_FILES);
+            }
+        }
+        0x3c => FILES_HELD.store(false, Ordering::Relaxed),
         _ if !released => {
             let Some(&normal) = NORMAL.get(code as usize) else {
                 return;
@@ -84,13 +127,22 @@ pub fn handle_scancode(scancode: u8) {
             if normal == 0 {
                 return;
             }
-            let mut ascii = if SHIFT.load(Ordering::Relaxed) {
+            let shift =
+                LEFT_SHIFT_HELD.load(Ordering::Relaxed) || RIGHT_SHIFT_HELD.load(Ordering::Relaxed);
+            let mut ascii = if shift {
                 SHIFTED[code as usize]
             } else {
                 normal
             };
             if CAPS_LOCK.load(Ordering::Relaxed) && ascii.is_ascii_alphabetic() {
                 ascii ^= 0x20; // flip the case bit
+            }
+            if LEFT_CTRL.load(Ordering::Relaxed) || RIGHT_CTRL.load(Ordering::Relaxed) {
+                // Ctrl+letter and Ctrl+[ \ ] ^ _ map to control codes 1..31.
+                if ascii.is_ascii_alphabetic() || matches!(ascii, b'[' | b'\\' | b']' | b'^' | b'_')
+                {
+                    ascii &= 0x1f;
+                }
             }
             input::push(ascii);
         }
@@ -100,11 +152,23 @@ pub fn handle_scancode(scancode: u8) {
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::Ordering;
+
     use super::handle_scancode;
     use crate::input;
 
     fn drain_input() {
         while input::pop().is_some() {}
+        // Start every test from a known modifier state.
+        super::LEFT_SHIFT_HELD.store(false, Ordering::Relaxed);
+        super::RIGHT_SHIFT_HELD.store(false, Ordering::Relaxed);
+        super::LEFT_CTRL.store(false, Ordering::Relaxed);
+        super::RIGHT_CTRL.store(false, Ordering::Relaxed);
+        super::CAPS_LOCK.store(false, Ordering::Relaxed);
+        super::CAPS_HELD.store(false, Ordering::Relaxed);
+        super::WINDOWS_HELD.store(false, Ordering::Relaxed);
+        super::BROWSER_HELD.store(false, Ordering::Relaxed);
+        super::FILES_HELD.store(false, Ordering::Relaxed);
     }
 
     #[test_case]
@@ -153,6 +217,48 @@ mod tests {
         assert_eq!(input::pop(), None);
 
         handle_scancode(0xbc); // F2 break
+        assert_eq!(input::pop(), None);
+    }
+
+    #[test_case]
+    fn releasing_one_shift_does_not_clear_the_other() {
+        drain_input();
+        handle_scancode(0x2a); // left shift make
+        handle_scancode(0x36); // right shift make
+        handle_scancode(0xaa); // left shift break
+        handle_scancode(0x41); // 'a'
+        assert_eq!(input::pop(), Some(b'A'));
+    }
+
+    #[test_case]
+    fn caps_lock_only_toggles_on_the_first_make() {
+        drain_input();
+        handle_scancode(0x3a); // caps make
+        handle_scancode(0x3a); // auto-repeat make
+        handle_scancode(0x41); // 'a'
+        assert_eq!(input::pop(), Some(b'A'));
+        handle_scancode(0xba); // caps break
+        handle_scancode(0x41); // 'a'
+        assert_eq!(input::pop(), Some(b'A'));
+    }
+
+    #[test_case]
+    fn ctrl_produces_a_control_code() {
+        drain_input();
+        handle_scancode(0x1d); // left ctrl make
+        handle_scancode(0x2e); // 'c'
+        assert_eq!(input::pop(), Some(0x03));
+        handle_scancode(0x9d); // left ctrl break
+        handle_scancode(0x2e); // 'c'
+        assert_eq!(input::pop(), Some(b'c'));
+    }
+
+    #[test_case]
+    fn holding_f1_does_not_reopen_the_browser() {
+        drain_input();
+        handle_scancode(0x3b); // F1 make
+        handle_scancode(0x3b); // auto-repeat
+        assert_eq!(input::pop(), Some(input::KEY_BROWSER));
         assert_eq!(input::pop(), None);
     }
 }

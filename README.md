@@ -7,8 +7,6 @@ Linux, no `std`, no libc.
 > bugs and breaking changes; it is not ready for daily use. The browser's HTTPS
 > support is encrypted but does not verify certificates.
 
-![GTos running in QEMU](docs/screenshot.png)
-
 ## The GTos Manual
 
 The manual lives in [`manual/`](manual/), which is its authoritative source.

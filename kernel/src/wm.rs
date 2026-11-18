@@ -401,16 +401,16 @@ impl Desktop {
 
     /// Moves window `i` to the front of the draw order, returning its new index.
     fn raise_window(&mut self, i: usize) -> usize {
+        // Compute the destination *before* removing the window: after `take()`
+        // slot `i` is empty, so scanning would find the wrong top and overwrite
+        // a lower window instead of moving this one above it.
+        let top = self.topmost_window().unwrap_or(i);
+        if top == i {
+            return i;
+        }
         let Some(w) = self.windows[i].take() else {
             return i;
         };
-        let mut top = i;
-        for j in (0..self.windows.len()).rev() {
-            if self.windows[j].is_some() {
-                top = j;
-                break;
-            }
-        }
         for j in i..top {
             self.windows[j] = self.windows[j + 1];
         }
@@ -590,6 +590,9 @@ impl Desktop {
             owned.iter().map(alloc::string::String::as_str).collect();
         let columns = self.browser_columns();
         self.browser_page = browser::Page::from_text(&lines, columns);
+        // The fallback is only a few lines long; keeping a scroll offset from
+        // the discarded multi-hundred-kilobyte page would render it blank.
+        self.browser_scroll = 0;
         self.browser_status = alloc::string::String::from("JavaScript required");
         true
     }
@@ -702,7 +705,7 @@ impl Desktop {
             self.browser_status = alloc::string::String::from("No network adapter");
             self.browser_message(&[
                 "No network adapter is up.",
-                "QEMU: -nic user,model=rtl8139; VirtualBox: Intel 82540EM.",
+                "Attach an RTL8139 or Intel 82540EM NIC to the VM.",
             ]);
             return;
         }
@@ -846,9 +849,71 @@ impl Desktop {
     // Command Prompt window
     // -----------------------------------------------------------------------
 
+    /// Replaces the command-prompt input line (used by history and completion).
+    fn cp_set_line(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let length = bytes.len().min(self.cp_input.len());
+        self.cp_input[..length].copy_from_slice(&bytes[..length]);
+        self.cp_input_len = length;
+    }
+
+    /// Runs one Command Prompt command and returns its captured output.
+    fn cp_submit(&self, cmd: &str) -> alloc::string::String {
+        if cmd == "echo" || cmd.starts_with("echo ") {
+            let rest = cmd.strip_prefix("echo").unwrap_or("").trim();
+            alloc::string::String::from(rest) + "\n"
+        } else if cmd == "heap" {
+            let (start, size) = crate::memory::info();
+            alloc::format!(
+                "heap: 0x{start:012x} .. 0x{:012x} ({} KiB)\n",
+                start + size,
+                size / 1024
+            )
+        } else if cmd == "mem" {
+            let mut out = alloc::string::String::new();
+            out.push_str("start            end                      size  kind\n");
+            let mut usable = 0u64;
+            for region in self.boot_info.memory_regions.iter() {
+                let size = region.end.saturating_sub(region.start);
+                let kind = match region.kind {
+                    bootloader_api::info::MemoryRegionKind::Usable => {
+                        usable += size;
+                        "usable"
+                    }
+                    bootloader_api::info::MemoryRegionKind::Bootloader => "bootloader",
+                    _ => "other",
+                };
+                let _ = core::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!(
+                        "0x{:012x}   0x{:012x}   {:>8} KiB  {}\n",
+                        region.start,
+                        region.end,
+                        size / 1024,
+                        kind
+                    ),
+                );
+            }
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "\n{} regions, {} MiB usable\n",
+                    self.boot_info.memory_regions.len(),
+                    usable / (1024 * 1024)
+                ),
+            );
+            out
+        } else {
+            console::start_capture();
+            if !cmd.is_empty() {
+                crate::shell::execute(cmd, self.boot_info);
+            }
+            console::stop_capture()
+        }
+    }
+
     /// Handles one input byte for the Command Prompt window. Returns `true`
     /// when the display needs to be repainted.
-    #[allow(clippy::too_many_lines)]
     fn cp_key(&mut self, byte: u8) -> bool {
         match byte {
             b'\n' | b'\r' => {
@@ -860,58 +925,9 @@ impl Desktop {
                 self.cp_output.push_str("C:\\> ");
                 self.cp_output.push_str(&cmd);
                 self.cp_output.push('\n');
+                crate::shell::history_push(&cmd);
 
-                let captured = if cmd == "echo" || cmd.starts_with("echo ") {
-                    let rest = cmd.strip_prefix("echo").unwrap_or("").trim();
-                    alloc::string::String::from(rest) + "\n"
-                } else if cmd == "heap" {
-                    let (start, size) = crate::memory::info();
-                    alloc::format!(
-                        "heap: 0x{start:012x} .. 0x{:012x} ({} KiB)\n",
-                        start + size,
-                        size / 1024
-                    )
-                } else if cmd == "mem" {
-                    let mut out = alloc::string::String::new();
-                    out.push_str("start            end                      size  kind\n");
-                    let mut usable = 0u64;
-                    for region in self.boot_info.memory_regions.iter() {
-                        let size = region.end.saturating_sub(region.start);
-                        let kind = match region.kind {
-                            bootloader_api::info::MemoryRegionKind::Usable => {
-                                usable += size;
-                                "usable"
-                            }
-                            bootloader_api::info::MemoryRegionKind::Bootloader => "bootloader",
-                            _ => "other",
-                        };
-                        let _ = core::fmt::Write::write_fmt(
-                            &mut out,
-                            format_args!(
-                                "0x{:012x}   0x{:012x}   {:>8} KiB  {}\n",
-                                region.start,
-                                region.end,
-                                size / 1024,
-                                kind
-                            ),
-                        );
-                    }
-                    let _ = core::fmt::Write::write_fmt(
-                        &mut out,
-                        format_args!(
-                            "\n{} regions, {} MiB usable\n",
-                            self.boot_info.memory_regions.len(),
-                            usable / (1024 * 1024)
-                        ),
-                    );
-                    out
-                } else {
-                    console::start_capture();
-                    if !cmd.is_empty() {
-                        crate::shell::execute(&cmd, self.boot_info);
-                    }
-                    console::stop_capture()
-                };
+                let captured = self.cp_submit(&cmd);
 
                 if !captured.is_empty() {
                     self.cp_output.push_str(&captured);
@@ -922,9 +938,39 @@ impl Desktop {
                 self.cp_input_len = 0;
                 true
             }
+            input::KEY_UP => {
+                let current =
+                    core::str::from_utf8(&self.cp_input[..self.cp_input_len]).unwrap_or("");
+                if let Some(previous) = crate::shell::history_prev(current) {
+                    self.cp_set_line(&previous);
+                    true
+                } else {
+                    false
+                }
+            }
+            input::KEY_DOWN => {
+                if let Some(next) = crate::shell::history_next() {
+                    self.cp_set_line(&next);
+                    true
+                } else {
+                    false
+                }
+            }
+            b'\t' => {
+                let current =
+                    core::str::from_utf8(&self.cp_input[..self.cp_input_len]).unwrap_or("");
+                if let Some(completed) = crate::shell::complete(current) {
+                    self.cp_set_line(&completed);
+                    true
+                } else {
+                    false
+                }
+            }
             0x08 => {
                 if self.cp_input_len > 0 {
                     self.cp_input_len -= 1;
+                    // Editing a recalled line makes the old history draft stale.
+                    crate::shell::history_reset();
                     true
                 } else {
                     false
@@ -933,6 +979,7 @@ impl Desktop {
             0x20..=0x7e if self.cp_input_len < 127 => {
                 self.cp_input[self.cp_input_len] = byte;
                 self.cp_input_len += 1;
+                crate::shell::history_reset();
                 true
             }
             _ => false,

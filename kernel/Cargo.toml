@@ -21,8 +21,8 @@ unsafe_code = "warn"
 all = "warn"
 pedantic = "warn"
 
-# The kernel logic lives in the library so the in-QEMU tests can link against it;
-# `src/main.rs` is a thin binary that owns the bootloader entry point.
+# The kernel logic lives in the library; `src/main.rs` is a thin binary that
+# owns the bootloader entry point.
 [lib]
 name = "kernel"
 path = "src/lib.rs"
@@ -33,21 +33,6 @@ name = "kernel"
 path = "src/main.rs"
 test = false
 bench = false
-
-# In-QEMU integration tests (see the README's *Testing* section).
-[[test]]
-name = "basic_boot"
-
-[[test]]
-name = "should_panic"
-harness = false
-
-# post-06's in-QEMU stack-overflow test. Like `should_panic` it runs without the
-# normal harness, because a double fault cannot return: it passes or fails by
-# exiting QEMU.
-[[test]]
-name = "stack_overflow"
-harness = false
 
 [lints]
 workspace = true

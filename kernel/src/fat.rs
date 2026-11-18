@@ -397,6 +397,13 @@ impl Volume {
             if entry.is_directory() {
                 return false;
             }
+            // Make the entry safe before releasing its clusters. If allocation
+            // or the data write later fails, the entry must not keep pointing
+            // at a chain another file can reuse; an empty file is harmless, a
+            // dangling chain is not.
+            if !self.write_entry(sector_index, index, name, 0, 0) {
+                return false;
+            }
             if !self.free_chain(entry.cluster) {
                 return false;
             }
@@ -576,7 +583,7 @@ pub fn format(drive: usize) -> bool {
     boot[0] = 0xEB;
     boot[1] = 0x3C;
     boot[2] = 0x90;
-    boot[3..11].copy_from_slice(b"GTOS  ");
+    boot[3..11].copy_from_slice(b"GTOS    ");
     boot[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
     boot[13] = sectors_per_cluster;
     boot[14..16].copy_from_slice(&reserved.to_le_bytes());
@@ -592,7 +599,7 @@ pub fn format(drive: usize) -> bool {
     boot[36] = 0x80; // drive number
     boot[38] = 0x29; // extended boot signature
     boot[39..43].copy_from_slice(&0x5255_5354u32.to_le_bytes()); // volume id
-    boot[43..54].copy_from_slice(b"GTOS     ");
+    boot[43..54].copy_from_slice(b"GTOS       ");
     boot[54..62].copy_from_slice(b"FAT16   ");
     boot[510] = 0x55;
     boot[511] = 0xAA;

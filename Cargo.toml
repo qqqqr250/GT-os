@@ -5,7 +5,7 @@ resolver = "3"
 # workspace: it has its own workspace in `kernel/Cargo.toml`. Keeping it out is
 # what lets `cargo clippy --workspace --all-targets` (which builds for the host)
 # succeed; the artifact dependency below still builds the kernel for the
-# bare-metal target. Run its tests with `cargo xtest`.
+# bare-metal target.
 exclude = ["kernel"]
 
 [workspace.lints.rust]

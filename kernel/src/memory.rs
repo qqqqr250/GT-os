@@ -18,10 +18,8 @@
 //! active level-4 table *mutably*, and `usermode` builds its own mapper for the
 //! ring-3 window ([`crate::usermode`]). Two live mappers over the same table would
 //! alias `&mut` references, which is undefined behaviour. So the mapper here is
-//! created only by [`init_mapper`], which is called from the in-QEMU tests through
-//! [`crate::testing::init_memory`] — never from `kernel_main`, where `usermode`
-//! owns the mapping work. The tests run the boot path without `usermode`, so no
-//! second mapper is ever live.
+//! created only by [`init_mapper`] — never from `kernel_main`, where `usermode`
+//! owns the mapping work. No second mapper is ever live.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,8 +43,7 @@ const PAGE_SIZE: u64 = 4096;
 #[global_allocator]
 static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
 
-/// The name of the allocator design [`ALLOCATOR`] implements, exposed to the
-/// in-QEMU tests through [`crate::testing::allocator_design`].
+/// The name of the allocator design [`ALLOCATOR`] implements.
 pub const ALLOCATOR_DESIGN: &str = "fixed-size block";
 
 static HEAP_START: AtomicU64 = AtomicU64::new(0);
@@ -102,7 +99,8 @@ pub fn init(
         .checked_add(start)
         .ok_or("heap address overflows the virtual address space")?;
 
-    let heap_bytes = usize::try_from(size).expect("the heap fits in the address space");
+    let heap_bytes =
+        usize::try_from(size).map_err(|_| "the heap does not fit in the address space")?;
     unsafe { ALLOCATOR.lock().init(heap_start as usize, heap_bytes) };
     HEAP_START.store(heap_start, Ordering::Relaxed);
     HEAP_SIZE.store(size, Ordering::Relaxed);
@@ -203,10 +201,8 @@ pub fn mapper_translate_addr(address: u64) -> Option<u64> {
 /// [`mapper_translate_addr`] so the two can be compared; the mapper performs
 /// exactly this walk.
 ///
-/// # Panics
-///
-/// Panics if the walk meets a huge (2 MiB or 1 GiB) page, which this simple walk
-/// cannot represent as a 4 KiB frame.
+/// Returns `None` if the walk meets a huge (2 MiB or 1 GiB) page, which this
+/// simple walk cannot represent as a 4 KiB frame.
 #[must_use]
 pub fn translate_addr(address: VirtAddr, physical_memory_offset: VirtAddr) -> Option<PhysAddr> {
     let (level_4_table_frame, _) = Cr3::read();
@@ -226,8 +222,7 @@ pub fn translate_addr(address: VirtAddr, physical_memory_offset: VirtAddr) -> Op
         let table = unsafe { &*table_ptr };
         frame = match table[index].frame() {
             Ok(frame) => frame,
-            Err(FrameError::FrameNotPresent) => return None,
-            Err(FrameError::HugeFrame) => panic!("huge pages are not supported by this walk"),
+            Err(FrameError::FrameNotPresent | FrameError::HugeFrame) => return None,
         };
     }
 

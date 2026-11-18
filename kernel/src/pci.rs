@@ -1,9 +1,8 @@
 //! Minimal PCI configuration-space access.
 //!
-//! Just enough to find and enable the emulated network adapters used by the
-//! test environments: QEMU's RTL8139 (I/O BAR) and `VirtualBox`'s Intel E1000
-//! (MMIO BAR). Only bus 0 is scanned: both hypervisors place these devices
-//! there, which keeps the scan short.
+//! Just enough to find and enable the supported emulated network adapters: the
+//! RTL8139 (I/O BAR) and the Intel E1000 (MMIO BAR). Only bus 0 is scanned:
+//! virtual machines place these devices there, which keeps the scan short.
 
 use x86_64::instructions::port::Port;
 

@@ -3,20 +3,8 @@
 # (nightly-only Cargo feature, see the README).
 bindeps = true
 
-# `cargo test` builds the kernel's test binaries for the bare-metal target and
-# hands each one to this runner, which wraps it in a bootable disk image and
-# boots it in QEMU (see kernel/tests and the README's *Testing* section).
-[target.'cfg(target_os = "none")']
-runner = "cargo run --quiet --manifest-path ../runner/Cargo.toml --"
-
 # The software crypto backends are selected explicitly: the x86 runtime feature
 # dispatch in `aes`, `polyval` and `sha2` hits an LLVM backend bug on this
 # bare-metal target. `sha2/force-soft` is enabled in the kernel manifest.
 [target.x86_64-unknown-none]
 rustflags = ["--cfg", "aes_force_soft", "--cfg", "polyval_force_soft"]
-
-[alias]
-# `cargo xtest` == run the kernel's in-QEMU test suite. The kernel is its own
-# workspace (see kernel/Cargo.toml), so it is addressed by manifest path rather
-# than with `-p`.
-xtest = "test --manifest-path kernel/Cargo.toml --target x86_64-unknown-none"

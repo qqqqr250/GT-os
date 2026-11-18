@@ -1,23 +1,18 @@
 <#
 .SYNOPSIS
     Installs everything GTos needs on Windows: nightly Rust, the bare-metal
-    targets, MinGW-w64 (host linker for build scripts) and QEMU.
+    targets and MinGW-w64 (host linker for build scripts).
 
 .DESCRIPTION
     The script is idempotent: it skips whatever is already installed. It also
     pins this directory to the GNU nightly toolchain with `rustup override`, so
     the rest of the system is left untouched.
 
-.PARAMETER SkipQemu
-    Do not install QEMU (useful if you run the disk images elsewhere).
-
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 #>
 [CmdletBinding()]
-param(
-    [switch]$SkipQemu
-)
+param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -74,33 +69,15 @@ if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
     Write-Host "MinGW-w64 found: $((Get-Command gcc).Source)"
 }
 
-if (-not $SkipQemu) {
-    Write-Step 'Checking QEMU'
-
-    if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
-        Write-Host 'QEMU not found, installing through winget...'
-        Invoke-Native winget @(
-            'install', '--id', 'SoftwareFreedomConservancy.QEMU', '-e',
-            '--accept-package-agreements', '--accept-source-agreements', '--silent'
-        )
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'winget could not install QEMU. Download it from https://www.qemu.org/download/ and put it on PATH.'
-        }
-        . (Join-Path $PSScriptRoot 'env.ps1')
-    } else {
-        Write-Host "QEMU found: $((Get-Command qemu-system-x86_64).Source)"
-    }
-}
-
 Write-Step 'Verifying'
 
 if (Test-Toolchain) {
     Write-Host "rustc: $(Invoke-Native rustc @('--version'))"
     Write-Host "cargo: $(Invoke-Native cargo @('--version'))"
-    Write-Host "qemu:  $(Invoke-Native qemu-system-x86_64 @('--version') | Select-Object -First 1)"
     Write-Host ''
     Write-Host 'Setup complete. Build and run with:' -ForegroundColor Green
-    Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\run.ps1'
+    Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\build.ps1'
+    Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\virtualbox.ps1 -Start'
 } else {
     Write-Host ''
     Write-Warning 'Setup finished with missing tools, see the list above.'

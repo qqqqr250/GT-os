@@ -505,7 +505,7 @@ pub fn color() -> ColorCode {
 /// Reads a cell back out of the buffer.
 ///
 /// Returns a blank cell when `row`/`column` are out of bounds or the buffer has
-/// not been initialized. Used by the in-QEMU tests to prove the window works.
+/// not been initialized. Useful for verifying the text window.
 #[must_use]
 pub fn read_screen_char(row: usize, column: usize) -> ScreenChar {
     if row >= HEIGHT || column >= WIDTH {
@@ -517,9 +517,8 @@ pub fn read_screen_char(row: usize, column: usize) -> ScreenChar {
     }
 }
 
-// Unit tests for the writer logic. They run inside QEMU through the crate's test
-// runner (`cargo xtest`) but drive a RAM-backed [`RamBuffer`], so they neither
-// need nor depend on a live text-mode device.
+// Unit tests for the writer logic. They drive a RAM-backed [`RamBuffer`], so
+// they neither need nor depend on a live text-mode device.
 #[cfg(test)]
 mod tests {
     use super::{BLANK, Color, ColorCode, HEIGHT, PLACEHOLDER, RamBuffer, WIDTH, Writer};

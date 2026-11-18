@@ -18,9 +18,8 @@
 //!   deallocation for the common sizes; the design the post settles on, and the one
 //!   [`crate::memory`] installs.
 //!
-//! The designs' unit tests live beside them (they run in the library's in-QEMU
-//! test binary against a small scratch region), and the installed design is
-//! exercised end to end by `kernel/tests/basic_boot.rs`.
+//! The designs' unit tests live beside them and run against a small scratch
+//! region; the installed design is used by the kernel heap at boot.
 
 pub mod bump;
 pub mod fixed_size_block;

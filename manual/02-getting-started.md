@@ -7,61 +7,58 @@
 | Rust nightly (`x86_64-pc-windows-gnu` host) | `abi_x86_interrupt`, `alloc_error_handler`, Cargo artifact dependencies | yes |
 | `x86_64-unknown-none`, `x86_64-unknown-uefi` targets | kernel and UEFI bootloader | yes |
 | MinGW-w64 (`gcc`, `as`, `dlltool`) | GNU host linker for build scripts | yes (WinLibs via winget) |
-| QEMU 8+ (`qemu-system-x86_64`) | running the images; OVMF `edk2-*.fd` for UEFI | yes |
-| Oracle `VirtualBox` 7+ (optional) | alternate GUI host with a real PS/2 mouse | no |
+| Oracle VirtualBox 7+ | running the images with a real PS/2 mouse | no |
 | PowerShell 5.1+ | helper scripts | Windows built-in |
 
 The repository pins the toolchain per directory (`rustup override`), so the
 rest of your machine is untouched. The nightly is required: the kernel uses
 `#![feature(abi_x86_interrupt)]`, `#![feature(alloc_error_handler)]` and
-`#![feature(custom_test_frameworks)]` (the in-QEMU test harness), and
 `Cargo.toml` uses the `artifact = "bin"` dependency form gated behind
 `-Z bindeps`.
 
 ## Quick start
 
 ```powershell
-# 1. Install Rust nightly, MinGW-w64 and QEMU (idempotent, no admin needed)
+# 1. Install Rust nightly, the bare-metal targets and MinGW-w64 (idempotent)
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 
 # 2. Build the kernel and both disk images (add --release for an optimised build)
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 
-# 3. Boot it (BIOS by default; use "uefi" for OVMF, "iso" for the disc image)
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1 uefi
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1 uefi iso
-
-# 4. Run the kernel's in-QEMU tests (unit + integration; needs QEMU)
-cargo xtest
-
-# 4b. (Optional) create a VirtualBox VM with the BIOS disk, the FAT16 data
-#     disk and a NAT Intel 82540EM NIC; add -Start to boot it immediately
-powershell -ExecutionPolicy Bypass -File scripts\virtualbox.ps1
-
-# 5. Prove it works without clicking anything
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Firmware uefi
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Release
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Firmware uefi -Iso
+# 3. Create (or recreate) a VirtualBox VM and boot the BIOS disk image.
+#    Omit -Start to create the VM without starting it.
+powershell -ExecutionPolicy Bypass -File scripts\virtualbox.ps1 -Start
 ```
 
-`scripts\run.ps1` forwards its arguments to the host launcher, so
-`scripts\run.ps1 --headless`, `scripts\run.ps1 uefi`, and
-`scripts\run.ps1 -- -smp 2 -cpu max` all work. Extra QEMU arguments go after
-`--`.
+`scripts\virtualbox.ps1` finds VBoxManage on PATH, in the usual install
+locations, or at `D:\virtualbox\VBoxManage.exe`; pass
+`-VBoxManage "<path>\VBoxManage.exe"` to override. It converts
+`gtos-bios.img` and `gtos-data.img` to VDI files under `D:\vbox` (override with
+`-VdiDir`) and attaches them as the primary master and slave IDE disks. The VM
+is named `GTos` by default and is recreated on each run, so the script is
+idempotent.
+
+The guest settings are deliberate:
+
+| Setting | Value |
+| --- | --- |
+| Firmware | BIOS (the disk image boots in legacy mode) |
+| APIC | off |
+| Graphics controller | `vboxvga` (supplies the VBE BIOS the bootloader needs) |
+| Mouse / keyboard | PS/2 |
+| Network | NAT with an Intel 82540EM NIC (`--nic1 nat --nic-type1 82540EM`) |
+| Host audio | disabled |
 
 Equivalent raw commands, if you prefer not to use the PowerShell wrappers:
 
 ```powershell
-cargo build                 # produces target\debug\build\gtos\*\out\gtos-{bios,uefi}.img and gtos.iso
-cargo run -- bios --headless
-cargo run -- uefi iso       # boot the ISO from a virtual CD-ROM
+cargo build
+& 'D:\virtualbox\VBoxManage.exe' list vms
 ```
 
-`scripts\screenshot.ps1` boots the BIOS image headlessly, waits for the Windows
-XP-style desktop to render, moves the pointer and writes `target\screenshot.png`
-via QEMU's `screendump` (useful for docs).
+`cargo build` writes the disk images and the ISO under
+`target\debug\build\gtos\<hash>\out\`; `src\main.rs` is only a build helper and
+prints those paths when the build finishes.
 
 ## Shell commands
 
@@ -95,4 +92,7 @@ via QEMU's `screendump` (useful for docs).
 | `pkg list` | list the in-OS package registry |
 | `panic` | trigger a kernel panic (tests the panic path) |
 | `reboot` | pulse the keyboard controller reset line |
-| `shutdown` | power off via QEMU's `isa-debug-exit` (halts elsewhere) |
+| `shutdown` | halt the machine (the guest stays powered on in VirtualBox) |
+
+See [Verifying GTos](11-testing.md) for a checklist of things to try once the
+VM is running.

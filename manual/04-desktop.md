@@ -3,8 +3,8 @@
 When firmware reports a linear framebuffer the kernel boots straight into a
 Windows XP-style desktop instead of the text shell (a serial-only boot still
 falls back to the shell). Any byte arriving on COM1 hands the console back to
-the shell, so a headless test can still drive the shell even though the desktop
-owns the screen. `kernel\src\wm.rs` draws everything with `put_pixel` on the
+the shell, so a serial connection can drive it even though the desktop owns the
+screen. `kernel\src\wm.rs` draws everything with `put_pixel` on the
 framebuffer. The whole scene is composed in an off-screen back buffer and copied
 to the framebuffer in one pass, so a click never exposes a half-drawn frame;
 moving the pointer just restores the 12x19 pixels it left behind (kept in a small
@@ -23,6 +23,8 @@ flickering through a full-screen repaint:
   Start menu,
 - a Browser with clickable links (**Tab** cycles through them, **Enter**
   follows the focused one) and address-bar web search,
+- a Command Prompt that runs real shell commands and shares the shell's
+  Ion-style history (**Up**/**Down**) and **Tab** completion,
 - a classic 12x19 arrow pointer whose hotspot is the top-left pixel.
 
 ## File manager
@@ -60,7 +62,8 @@ the ACK bytes cannot be stolen by the interrupt handler. `handle_byte`
 resynchronises on the first packet byte (bit 3 must be set), which discards stray
 bytes and keeps the pointer from drifting.
 
-> **QEMU: click inside the window first.** QEMU does not forward mouse motion
-> until its pointer is *grabbed*, which happens when you click in the guest
-> window (press **Ctrl+Alt+G** to release it again). Until then the cursor will
-> not move, even though the driver is working.
+> **VirtualBox: click inside the VM window first.** VirtualBox only forwards
+> mouse motion once the guest has captured the pointer, which happens when you
+> click in the VM window (press the **Host key**, right Ctrl by default, to
+> release it again). Until then the cursor will not move, even though the driver
+> is working.

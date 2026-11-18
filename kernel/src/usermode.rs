@@ -74,6 +74,12 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 const SYS_EXIT: u64 = 0;
 /// `write(fd, buffer, length)`.
 const SYS_WRITE: u64 = 1;
+/// `open(url, length)` -> scheme descriptor (>= 3) or `u64::MAX`.
+const SYS_OPEN: u64 = 2;
+/// `read(fd, buffer, length)` -> number of bytes read.
+const SYS_READ: u64 = 3;
+/// `close(fd)` -> 0 on success.
+const SYS_CLOSE: u64 = 4;
 
 static GDT: Mutex<GlobalDescriptorTable> = Mutex::new(GlobalDescriptorTable::new());
 
@@ -427,6 +433,80 @@ pub fn demo_program() -> Vec<u8> {
     program
 }
 
+/// A ring-3 program that exercises the scheme syscalls.
+///
+/// It opens `sys:/version`, reads it into a user buffer, writes that buffer to
+/// the console, closes the descriptor and exits. All addresses are absolute in
+/// the user window because the flat binary is loaded at [`USER_BASE`].
+pub fn scheme_demo_program() -> Vec<u8> {
+    const PATH: &[u8] = b"sys:/version";
+    const PATH_OFFSET: u64 = 128;
+    const BUFFER_OFFSET: u64 = 160;
+    const BUFFER_LEN: u32 = 256;
+
+    let mut program = Vec::new();
+    // mov eax, SYS_OPEN
+    program.extend_from_slice(&[0xb8]);
+    program.extend_from_slice(&(SYS_OPEN as u32).to_le_bytes());
+    // mov rdi, USER_BASE + PATH_OFFSET
+    program.extend_from_slice(&[0x48, 0xbf]);
+    program.extend_from_slice(&(USER_BASE + PATH_OFFSET).to_le_bytes());
+    // mov esi, PATH.len()
+    program.push(0xbe);
+    program.extend_from_slice(&(PATH.len() as u32).to_le_bytes());
+    // int 0x80
+    program.extend_from_slice(&[0xcd, 0x80]);
+    // mov r12, rax -- the descriptor must survive the next syscall
+    program.extend_from_slice(&[0x49, 0x89, 0xc4]);
+    // mov eax, SYS_READ
+    program.extend_from_slice(&[0xb8]);
+    program.extend_from_slice(&(SYS_READ as u32).to_le_bytes());
+    // mov rdi, r12
+    program.extend_from_slice(&[0x4c, 0x89, 0xe7]);
+    // mov rsi, USER_BASE + BUFFER_OFFSET
+    program.extend_from_slice(&[0x48, 0xbe]);
+    program.extend_from_slice(&(USER_BASE + BUFFER_OFFSET).to_le_bytes());
+    // mov edx, BUFFER_LEN
+    program.push(0xba);
+    program.extend_from_slice(&BUFFER_LEN.to_le_bytes());
+    // int 0x80
+    program.extend_from_slice(&[0xcd, 0x80]);
+    // mov r13, rax -- the byte count must survive the next syscall
+    program.extend_from_slice(&[0x49, 0x89, 0xc5]);
+    // mov eax, SYS_WRITE
+    program.extend_from_slice(&[0xb8]);
+    program.extend_from_slice(&(SYS_WRITE as u32).to_le_bytes());
+    // mov edi, 1
+    program.extend_from_slice(&[0xbf, 0x01, 0x00, 0x00, 0x00]);
+    // mov rsi, USER_BASE + BUFFER_OFFSET
+    program.extend_from_slice(&[0x48, 0xbe]);
+    program.extend_from_slice(&(USER_BASE + BUFFER_OFFSET).to_le_bytes());
+    // mov rdx, r13
+    program.extend_from_slice(&[0x4c, 0x89, 0xea]);
+    // int 0x80
+    program.extend_from_slice(&[0xcd, 0x80]);
+    // mov eax, SYS_CLOSE
+    program.extend_from_slice(&[0xb8]);
+    program.extend_from_slice(&(SYS_CLOSE as u32).to_le_bytes());
+    // mov rdi, r12
+    program.extend_from_slice(&[0x4c, 0x89, 0xe7]);
+    // int 0x80
+    program.extend_from_slice(&[0xcd, 0x80]);
+    // mov eax, SYS_EXIT
+    program.extend_from_slice(&[0xb8]);
+    program.extend_from_slice(&(SYS_EXIT as u32).to_le_bytes());
+    // xor edi, edi
+    program.extend_from_slice(&[0x31, 0xff]);
+    // int 0x80
+    program.extend_from_slice(&[0xcd, 0x80]);
+
+    debug_assert!(program.len() <= PATH_OFFSET as usize);
+    program.resize(PATH_OFFSET as usize, 0);
+    program.extend_from_slice(PATH);
+    program.resize((BUFFER_OFFSET + u64::from(BUFFER_LEN)) as usize, 0);
+    program
+}
+
 /// Maps the user program and stack pages on first use.
 fn ensure_mapped() -> Result<(), &'static str> {
     if MAPPED.load(Ordering::SeqCst) {
@@ -503,10 +583,30 @@ extern "C" fn syscall_dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64) -> 
     match number {
         // SAFETY: `exit_user` restores the kernel stack saved by
         // `enter_user_mode`; it never returns to this frame.
-        SYS_EXIT => unsafe { exit_user(arg0) },
+        SYS_EXIT => {
+            // Descriptors live in a global table: release anything the program
+            // forgot to close before it leaves, so the next program starts clean.
+            crate::scheme::close_all_fds();
+            unsafe { exit_user(arg0) }
+        }
         SYS_WRITE => sys_write(arg0, arg1, arg2),
+        SYS_OPEN => sys_open(arg0, arg1, arg2),
+        SYS_READ => sys_read(arg0, arg1, arg2),
+        SYS_CLOSE => sys_close(arg0, arg1, arg2),
         _ => u64::MAX,
     }
+}
+
+/// Validates a user-memory range, returning `(virtual address, length)`.
+///
+/// Every pointer the syscalls accept is checked against the single user window:
+/// a program can never name kernel memory, even with a wrapping address.
+fn user_range(address: u64, length: u64) -> Option<(usize, usize)> {
+    let end = address.checked_add(length)?;
+    if address < USER_BASE || end > STACK_TOP {
+        return None;
+    }
+    Some((address as usize, usize::try_from(length).ok()?))
 }
 
 /// `write(fd, buffer, length)`: writes to the console on fd 1 or 2.
@@ -514,16 +614,43 @@ fn sys_write(fd: u64, buffer: u64, length: u64) -> u64 {
     if fd != 1 && fd != 2 {
         return u64::MAX;
     }
-    let end = buffer.saturating_add(length);
-    if buffer < USER_BASE || end > STACK_TOP {
-        return u64::MAX;
-    }
-    let Ok(length) = usize::try_from(length) else {
+    let Some((start, length)) = user_range(buffer, length) else {
         return u64::MAX;
     };
-    // SAFETY: the range was just checked to lie inside the user window, which is
-    // mapped and readable for the whole run.
-    let bytes = unsafe { core::slice::from_raw_parts(buffer as *const u8, length) };
+    // SAFETY: `user_range` proved the range lies inside the mapped user window.
+    let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, length) };
     crate::console::write_bytes(bytes);
     length as u64
+}
+
+/// `open(url, length)`: opens a scheme resource, returning a descriptor >= 3.
+fn sys_open(url: u64, length: u64, _arg2: u64) -> u64 {
+    let Some((start, length)) = user_range(url, length) else {
+        return u64::MAX;
+    };
+    // SAFETY: `user_range` proved the range lies inside the mapped user window.
+    let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, length) };
+    let Ok(url) = core::str::from_utf8(bytes) else {
+        return u64::MAX;
+    };
+    crate::scheme::open_fd(url).unwrap_or(u64::MAX)
+}
+
+/// `read(fd, buffer, length)`: reads up to `length` bytes from a scheme.
+fn sys_read(fd: u64, buffer: u64, length: u64) -> u64 {
+    let Some((start, length)) = user_range(buffer, length) else {
+        return u64::MAX;
+    };
+    // SAFETY: `user_range` proved the range lies inside the mapped user window.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, length) };
+    crate::scheme::read_fd(fd, bytes).map_or(u64::MAX, |count| count as u64)
+}
+
+/// `close(fd)`: releases a scheme descriptor.
+fn sys_close(fd: u64, _arg1: u64, _arg2: u64) -> u64 {
+    if crate::scheme::close_fd(fd) {
+        0
+    } else {
+        u64::MAX
+    }
 }

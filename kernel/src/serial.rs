@@ -1,8 +1,8 @@
 //! Driver for the first 16550-compatible UART (COM1).
 //!
 //! The serial port is the kernel's out-of-band console: every line printed to
-//! the screen is also written here, which is what makes the OS testable in CI
-//! (QEMU can pipe COM1 to a socket or to stdout).
+//! the screen is also written here, so a virtual machine can capture COM1 to a
+//! socket or to a file.
 //!
 //! Every lock on [`SERIAL`] is taken inside `without_interrupts` (post-07). The
 //! timer handler prints through this same lock, so if the main thread held it
@@ -151,8 +151,8 @@ pub fn print_args(args: core::fmt::Arguments<'_>) {
 
 /// Prints to the host through the serial interface (COM1).
 ///
-/// This is the machine-readable mirror of the on-screen console, which is what
-/// makes the OS testable: QEMU pipes COM1 to stdout or a socket.
+/// This is the machine-readable mirror of the on-screen console, so a virtual
+/// machine can capture COM1 to stdout or a socket.
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {

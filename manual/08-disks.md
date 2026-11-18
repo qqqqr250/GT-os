@@ -16,9 +16,7 @@ file and rebuild to regenerate a pristine image.
 ```
 gtos> disks
 drive 0 (master): 5 MiB, 11202 sectors
-  model: QEMU HARDDISK
 drive 1 (slave): 16 MiB, 32768 sectors
-  model: QEMU HARDDISK
 gtos> write NOTES.TXT hello from GTos
 wrote 19 bytes to NOTES.TXT
 gtos> cat NOTES.TXT

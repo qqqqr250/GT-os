@@ -73,14 +73,15 @@ pub fn view(all: &[Item], filter: &str, key: SortKey, descending: bool) -> Vec<I
     items
 }
 
-/// Case-insensitive search. `*` is a wildcard; without it the filter is a
-/// substring match, which makes short searches behave like Sigma's smart search.
+/// Case-insensitive search. `*` and `?` are wildcards; without them the filter
+/// is a substring match, which makes short searches behave like Sigma's smart
+/// search.
 pub fn matches(name: &str, filter: &str) -> bool {
     let pattern = filter.trim();
     if pattern.is_empty() {
         return true;
     }
-    if pattern.contains('*') {
+    if pattern.contains(['*', '?']) {
         wildcard(name, pattern)
     } else {
         find_ci(name, pattern).is_some()
@@ -138,29 +139,38 @@ pub fn kind(name: &str, is_dir: bool) -> &'static str {
     }
 }
 
-/// `*` wildcard matching, case-insensitive and applied left to right.
+/// `*` (any number of characters) and `?` (exactly one) wildcard matching,
+/// case-insensitive, with backtracking when a `*` would consume too much.
 fn wildcard(name: &str, pattern: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let Some(first) = parts.next() else {
-        return true;
-    };
-    let Some(start) = find_ci(name, first) else {
-        return false;
-    };
-    if start != 0 {
-        return false;
-    }
-    let mut pos = first.len();
-    for part in parts {
-        if part.is_empty() {
-            continue;
-        }
-        let Some(offset) = find_ci(&name[pos.min(name.len())..], part) else {
+    let name: Vec<char> = name.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    let mut ni = 0usize;
+    let mut pi = 0usize;
+    let mut star = None;
+    let mut after_star = 0usize;
+
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi].eq_ignore_ascii_case(&name[ni]))
+        {
+            ni += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            after_star = ni;
+        } else if let Some(index) = star {
+            // Give the most recent `*` one more character and retry.
+            pi = index + 1;
+            after_star += 1;
+            ni = after_star;
+        } else {
             return false;
-        };
-        pos += offset + part.len();
+        }
     }
-    pattern.ends_with('*') || pos == name.len()
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 /// Byte offset of `needle` in `haystack`, ignoring ASCII case.
@@ -219,6 +229,20 @@ mod tests {
         assert!(matches("BEEP.WAV", "*.WAV"));
         assert!(matches("HELLO.BIN", "H*.BIN"));
         assert!(!matches("README.TXT", "*.WAV"));
+    }
+
+    #[test_case]
+    fn wildcard_backtracks_and_supports_question_marks() {
+        // A greedy `*` must give characters back so the rest can match.
+        assert!(matches("axxb", "*a*b"));
+        assert!(matches("abab", "*a*b"));
+        assert!(matches("aabb", "*a*b"));
+        // Consecutive and trailing stars are harmless.
+        assert!(matches("BEEP.WAV", "**.WAV"));
+        assert!(matches("README.TXT", "README*"));
+        // `?` matches exactly one character, case-insensitively.
+        assert!(matches("FILE.TXT", "????.txt"));
+        assert!(!matches("FILES.TXT", "????.TXT"));
     }
 
     #[test_case]

@@ -1,14 +1,13 @@
 //! AC'97 audio output.
 //!
-//! Drives QEMU's emulated Intel 82801AA AC'97 controller (PCI `8086:2415`).
+//! Drives an emulated Intel 82801AA AC'97 controller (PCI `8086:2415`).
 //! The mixer registers live in BAR0 (NAM) and the bus-master registers in BAR1
 //! (NABM). Playback goes through the PCM-out DMA engine with a small buffer
 //! descriptor list; the transfer is polled rather than interrupt-driven so the
 //! whole driver stays single-threaded, matching the rest of the kernel.
 //!
-//! `-device AC97,audiodev=snd0` with `-audiodev wav,id=snd0` in QEMU writes
-//! everything the guest plays to a `.wav` file, which is how the driver is
-//! verified.
+//! An emulated AC'97 controller can be attached to a virtual machine to hear
+//! the playback.
 
 use alloc::vec::Vec;
 
@@ -38,17 +37,29 @@ const PO_CR_RPBM: u8 = 0x01; // run / pause bus master
 const PO_CR_RR: u8 = 0x02; // reset registers
 const PO_SR_DCH: u16 = 0x0001; // DMA controller halted
 
-/// Buffer descriptor list: 32 entries of 16 bytes.
+/// Buffer descriptor list: 32 entries of 8 bytes.
+///
+/// The 82801AA bus-master descriptor is two little-endian dwords: a 32-bit
+/// physical address, then a word whose low 16 bits are the length in 16-bit
+/// samples and whose high 16 bits hold the control flags. This hardware ends a
+/// transfer with the Last Valid Index register, not an "end of table" bit.
 const DESCRIPTORS: usize = 32;
+/// Size of one BDL entry: address dword + length/control dword.
+const BDL_ENTRY_BYTES: usize = 8;
+/// Interrupt-on-completion, bit 15 of the control word (bit 31 of the dword).
+const BDL_IOC: u16 = 0x8000;
 /// Largest single descriptor, in bytes. Must be a multiple of the 4-byte frame
-/// size and below 0xFFFE.
-const DESCRIPTOR_BYTES: usize = 0x3ff8;
+/// size, divide 64 KiB evenly (so a chunk never straddles a physical boundary),
+/// and fit the 16-bit sample-count field.
+const DESCRIPTOR_BYTES: usize = 0x4000;
 
 /// Native sample rate used for generated tones.
 pub const SAMPLE_RATE: u16 = 48_000;
 
-/// The hard cap on one playback, in bytes (~5 s of 16-bit stereo at 48 kHz).
-const MAX_PLAYBACK: usize = DESCRIPTORS * DESCRIPTOR_BYTES;
+/// The hard cap on one playback, in bytes (~2.6 s of 16-bit stereo at 48 kHz).
+/// One descriptor is reserved for a partial chunk before the first 64 KiB
+/// physical boundary.
+const MAX_PLAYBACK: usize = (DESCRIPTORS - 1) * DESCRIPTOR_BYTES;
 
 struct Ac97 {
     mixer: u16,
@@ -141,7 +152,7 @@ pub fn init(physical_memory_offset: u64) -> bool {
         mixer,
         bus,
         offset: physical_memory_offset,
-        bdl: alloc::vec![0u64; DESCRIPTORS * 2],
+        bdl: alloc::vec![0u64; DESCRIPTORS],
         buffer: Vec::new(),
     });
     true
@@ -152,19 +163,34 @@ pub fn is_up() -> bool {
     AUDIO.lock().is_some()
 }
 
+/// Longest tone, in milliseconds, that a single playback can describe at the
+/// native sample rate. Callers should clamp to this so the duration they report
+/// matches the duration actually played.
+#[must_use]
+pub fn max_tone_ms() -> u32 {
+    let frames = MAX_PLAYBACK / 4;
+    ((frames * 1000) / usize::from(SAMPLE_RATE)) as u32
+}
+
 /// A short attention beep.
 pub fn beep() -> bool {
     tone(880, 160)
 }
 
 /// Plays a square-ish tone of `frequency` Hz for `milliseconds`.
+#[allow(clippy::cast_possible_truncation)]
 pub fn tone(frequency: u32, milliseconds: u32) -> bool {
     let rate = u32::from(SAMPLE_RATE);
-    let frames = (rate * milliseconds / 1000).max(1);
-    let period = (rate / frequency.max(1)).max(2);
+    // Do the arithmetic wide enough that a long duration cannot overflow, and
+    // clamp to what one playback can describe so the buffer size is bounded.
+    let frames = (rate as usize)
+        .saturating_mul(milliseconds as usize)
+        .saturating_div(1000)
+        .clamp(1, MAX_PLAYBACK / 4);
+    let period = (rate / frequency.max(1)).max(2) as usize;
     let half = (period / 2).max(1);
 
-    let mut samples = Vec::with_capacity(frames as usize * 2);
+    let mut samples = Vec::with_capacity(frames * 2);
     for frame in 0..frames {
         // Triangle wave: a softer edge than a square wave, and cheap to
         // generate without a sine table.
@@ -219,25 +245,39 @@ impl Ac97 {
             staging[i * 2 + 1] = pair[1];
         }
 
-        // Build the descriptor list. Each entry points at part of the buffer.
+        // Build the descriptor list. Each 8-byte entry points at part of the
+        // buffer: address dword, then length (16-bit samples) + control word.
         let buffer_physical = (self.buffer.as_ptr() as u64).wrapping_sub(self.offset);
-        // SAFETY: `bdl` is 16 * DESCRIPTORS bytes long (as 64-bit words).
+        // SAFETY: `bdl` is 8 * DESCRIPTORS bytes long, one entry per descriptor.
         let bdl = unsafe {
             core::slice::from_raw_parts_mut(self.bdl.as_mut_ptr().cast::<u8>(), self.bdl.len() * 8)
         };
         let mut offset = 0usize;
         let mut count = 0usize;
         while offset < bytes && count < DESCRIPTORS {
-            let length = (bytes - offset).min(DESCRIPTOR_BYTES) & !3;
+            let address = buffer_physical + offset as u64;
+            // A single descriptor must not cross a 64 KiB physical boundary:
+            // cap the chunk at the bytes remaining in the current 64 KiB page.
+            let to_boundary = 0x1_0000 - (address & 0xffff) as usize;
+            let length = (bytes - offset).min(DESCRIPTOR_BYTES).min(to_boundary) & !3;
             if length == 0 {
                 break;
             }
-            let entry = &mut bdl[count * 16..count * 16 + 16];
-            entry[0..4].copy_from_slice(&((buffer_physical + offset as u64) as u32).to_le_bytes());
-            entry[4..6].copy_from_slice(&(length as u16).to_le_bytes());
+            let start = count * BDL_ENTRY_BYTES;
+            let entry = &mut bdl[start..start + BDL_ENTRY_BYTES];
+            entry[0..4].copy_from_slice(&(address as u32).to_le_bytes());
+            // The hardware counts 16-bit samples (`picb << 1` is the byte
+            // count), so write bytes / 2 rather than a byte count.
+            entry[4..6].copy_from_slice(&((length / 2) as u16).to_le_bytes());
             entry[6..8].copy_from_slice(&0u16.to_le_bytes());
             offset += length;
             count += 1;
+        }
+        if count > 0 {
+            // Only the final descriptor is marked: the engine stops when the
+            // Last Valid Index is reached, so this is an IOC marker, not EOT.
+            let last = (count - 1) * BDL_ENTRY_BYTES + 6;
+            bdl[last..last + 2].copy_from_slice(&BDL_IOC.to_le_bytes());
         }
         if count == 0 {
             return false;

@@ -10,9 +10,19 @@ physical-memory window.
 
 The only way in is `int 0x80`, installed as a DPL-3 gate. The handler is written
 in `global_asm!`: it saves the user registers, calls the Rust dispatcher and
-`iretq`s back. Two system calls exist today — `exit(status)` (0) and
-`write(fd, buffer, length)` (1) — which is enough for a program to print and
-return. A fault taken in ring 3 is contained: the exception handler notices the
+`iretq`s back. Five system calls exist today:
+
+| Number | Call | Purpose |
+|--------|------|---------|
+| 0 | `exit(status)` | terminate the program |
+| 1 | `write(fd, buffer, length)` | write to console fd 1 or 2 |
+| 2 | `open(url, length)` | open a scheme resource, returning fd >= 3 |
+| 3 | `read(fd, buffer, length)` | read bytes from a scheme descriptor |
+| 4 | `close(fd)` | release a scheme descriptor |
+
+Every pointer argument is checked against the single user window before it is
+dereferenced, so a program cannot name kernel memory even with a wrapping
+address. A fault taken in ring 3 is contained: the exception handler notices the
 faulting `CS` has RPL 3, reports it and terminates the program, handing control
 back to the shell instead of halting the machine.
 
@@ -29,7 +39,18 @@ gtos> run HELLO.BIN
 running HELLO.BIN (77 bytes) in ring 3 ...
 Hello from HELLO.BIN running in ring 3!
 HELLO.BIN exited with status 0
+gtos> run scheme
+running scheme demo (416 bytes) in ring 3 ...
+GTos 0.1.0
+x86_64 bare-metal kernel
+written in Rust, no std, no libc
+scheme demo exited with status 0
 ```
+
+`run scheme` is the built-in demonstration of the scheme syscalls: it opens the
+`sys:/version` resource, reads it into its own buffer, writes that buffer to the
+console and closes the descriptor. The same `open`/`read`/`close` path is
+available to any flat binary loaded from the data disk.
 
 Because `exit_user` returns to the kernel with `ret` rather than `iretq`, it
 restores the kernel's saved `RFLAGS` by hand — without that, the `int 0x80`

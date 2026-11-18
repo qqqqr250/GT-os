@@ -1,10 +1,10 @@
 # Shared environment for the GTos helper scripts.
 #
-# The toolchain lives outside the project (rustup, MinGW-w64, QEMU), so every
+# The toolchain lives outside the project (rustup, MinGW-w64), so every
 # script dot-sources this file to put the pieces on PATH for its own session
 # without permanently changing the user's environment.
 
-# Cargo, rustup and QEMU print their progress to stderr, and every script here
+# Cargo and rustup print their progress to stderr, and every script here
 # runs with `$ErrorActionPreference = 'Stop'`. A native command's stderr then
 # becomes a *terminating* error as soon as the stream is captured or redirected
 # (a CI log, or a parent script calling `script.ps1 2>&1`), which surfaces as a
@@ -89,9 +89,6 @@ foreach ($mingwRoot in $mingwRoots) {
     }
 }
 
-# QEMU
-Add-ToPath @('C:\Program Files\qemu', 'C:\Program Files (x86)\qemu')
-
 function Test-Toolchain {
     $missing = @()
 
@@ -101,10 +98,6 @@ function Test-Toolchain {
     if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
         $missing += 'MinGW-w64 gcc (run scripts\setup.ps1)'
     }
-    if (-not (Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue)) {
-        $missing += 'qemu-system-x86_64 (run scripts\setup.ps1)'
-    }
-
     if ($missing.Count -gt 0) {
         Write-Host 'Missing tools:' -ForegroundColor Yellow
         foreach ($tool in $missing) { Write-Host "  - $tool" }

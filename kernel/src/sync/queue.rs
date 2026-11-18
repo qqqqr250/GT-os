@@ -18,8 +18,8 @@
 //! This is Vyukov's bounded MPMC queue. It needs at least two slots: with one
 //! slot the "full" and "free" stamps coincide.
 
-// A few methods exist for parity with `examples/async-await` and are only
-// exercised by this module's unit tests; the kernel itself calls a subset.
+// A few methods are only exercised by this module's unit tests; the kernel
+// itself calls a subset.
 #![allow(dead_code)]
 
 use alloc::boxed::Box;

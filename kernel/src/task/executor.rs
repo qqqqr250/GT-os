@@ -11,8 +11,8 @@
 //!   interrupt-disable the CPU could go to sleep *after* an interrupt queued a
 //!   task but *before* the `hlt`, and the task would wait for the next interrupt.
 
-// `run`/`sleep_if_idle` are kept for parity with `examples/async-await`; the
-// kernel polls with `run_ready_tasks` from its own loops.
+// `run`/`sleep_if_idle` are kept as useful executor entry points; the kernel
+// polls with `run_ready_tasks` from its own loops.
 #![allow(dead_code)]
 
 use alloc::collections::BTreeMap;

@@ -1,18 +1,38 @@
 //! The interactive shell and the boot-time log helpers.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use core::fmt;
 
 use bootloader_api::info::{BootInfo, MemoryRegionKind};
+use spin::Mutex;
 
 use crate::console::{print, println};
 use crate::{ata, audio, console, fat, input, interrupts, memory, net, task, usermode};
 
 const PROMPT: &str = "gtos> ";
 const BANNER_WIDTH: usize = 62;
+
+/// How many command lines the Ion-style history keeps.
+const HISTORY_LIMIT: usize = 32;
+
+/// Oldest-to-newest command history, shared by the serial and GUI shells.
+static HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// `Some(index)` while the user is browsing history, `None` while editing a
+/// fresh line.
+static HISTORY_CURSOR: Mutex<Option<usize>> = Mutex::new(None);
+/// The half-typed line to restore when browsing past the newest entry.
+static HISTORY_DRAFT: Mutex<String> = Mutex::new(String::new());
+
+/// Commands offered by Tab. File names are completed separately in [`complete`].
+const COMMAND_NAMES: &[&str] = &[
+    "help", "echo", "clear", "mem", "heap", "alloc", "uptime", "cpu", "logo", "about", "net",
+    "dhcp", "ping", "dns", "http", "open", "schemes", "beep", "tone", "disks", "ls", "dir", "cat",
+    "type", "write", "rm", "del", "play", "format", "run", "panic", "reboot", "shutdown",
+    "poweroff", "exit", "pkg",
+];
 
 /// Prints `count` copies of `ch` without allocating.
 fn fill(ch: char, count: usize) {
@@ -67,6 +87,127 @@ pub fn status(ok: bool, message: fmt::Arguments<'_>) {
     println!("{message}");
 }
 
+/// Forgets the current browsing position. Called after Enter, Ctrl-C and a new
+/// command, so Up always starts from the newest entry.
+pub fn history_reset() {
+    *HISTORY_CURSOR.lock() = None;
+    HISTORY_DRAFT.lock().clear();
+}
+
+/// Records a command after it has been submitted. Consecutive duplicates are
+/// collapsed, just like a typical Unix shell.
+pub fn history_push(line: &str) {
+    let command = line.trim();
+    history_reset();
+    if command.is_empty() {
+        return;
+    }
+    let mut history = HISTORY.lock();
+    if history.last().is_some_and(|last| last == command) {
+        return;
+    }
+    history.push(String::from(command));
+    if history.len() > HISTORY_LIMIT {
+        history.remove(0);
+    }
+}
+
+/// Recalls the previous command, saving `current` so Down can restore it.
+pub fn history_prev(current: &str) -> Option<String> {
+    let history = HISTORY.lock();
+    if history.is_empty() {
+        return None;
+    }
+    let mut cursor = HISTORY_CURSOR.lock();
+    let index = if let Some(index) = *cursor {
+        index.saturating_sub(1)
+    } else {
+        *HISTORY_DRAFT.lock() = String::from(current);
+        history.len() - 1
+    };
+    *cursor = Some(index);
+    history.get(index).cloned()
+}
+
+/// Walks forward through history, returning the saved draft at the end.
+pub fn history_next() -> Option<String> {
+    let history = HISTORY.lock();
+    let mut cursor = HISTORY_CURSOR.lock();
+    let index = (*cursor)?;
+    if index + 1 < history.len() {
+        let next = index + 1;
+        *cursor = Some(next);
+        history.get(next).cloned()
+    } else {
+        *cursor = None;
+        Some(HISTORY_DRAFT.lock().clone())
+    }
+}
+
+/// Completes a command name, or a file name for file-oriented commands.
+///
+/// Returns the fully rewritten line only when there is exactly one candidate,
+/// so an ambiguous prefix never silently changes what the user typed.
+pub fn complete(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if !trimmed.contains(char::is_whitespace) {
+        let mut candidates = COMMAND_NAMES
+            .iter()
+            .filter(|name| name.starts_with(trimmed));
+        let first = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        return Some((*first).to_string());
+    }
+
+    let (command, tail) = trimmed.split_once(char::is_whitespace)?;
+    if !matches!(
+        command,
+        "cat" | "type" | "play" | "rm" | "del" | "run" | "open"
+    ) {
+        return None;
+    }
+    let argument = tail.trim_start();
+    let (scheme_prefix, name_prefix) = if let Some(rest) = argument.strip_prefix("file:/") {
+        ("file:/", rest.trim_start_matches('/'))
+    } else {
+        ("", argument.trim_start_matches('/'))
+    };
+    if name_prefix.is_empty() {
+        return None;
+    }
+    let mut candidates = crate::fm::snapshot()
+        .into_iter()
+        .filter(|item| item.name.starts_with(name_prefix))
+        .map(|item| item.name);
+    let name = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    let prefix_len = line.len().checked_sub(tail.len())?;
+    let mut result = String::from(&line[..prefix_len]);
+    result.push_str(scheme_prefix);
+    result.push_str(&name);
+    Some(result)
+}
+
+/// Redraws the editable prompt after a history recall or Tab completion.
+fn redraw_line(line: &str, drawn: &mut usize) {
+    print!("\r{PROMPT}{line}");
+    if *drawn > line.len() {
+        for _ in 0..(*drawn - line.len()) {
+            print!(" ");
+        }
+        print!("\r{PROMPT}{line}");
+    }
+    *drawn = (*drawn).max(line.len());
+}
+
 pub fn run(boot_info: &'static BootInfo) -> ! {
     println!();
     println!("Type 'help' for the list of commands.");
@@ -100,6 +241,7 @@ fn wait_for_input() -> u8 {
 /// Reads one line, echoing it as the user types. Returns `false` if the line
 /// was cancelled with Ctrl-C.
 fn read_line(line: &mut String) -> bool {
+    let mut drawn = 0usize;
     loop {
         let byte = wait_for_input();
         match byte {
@@ -109,26 +251,51 @@ fn read_line(line: &mut String) -> bool {
                 if let Some(b'\r' | b'\n') = input::peek() {
                     input::pop();
                 }
+                history_push(line);
                 println!();
                 return true;
+            }
+            input::KEY_UP => {
+                if let Some(previous) = history_prev(line) {
+                    *line = previous;
+                    redraw_line(line, &mut drawn);
+                }
+            }
+            input::KEY_DOWN => {
+                if let Some(next) = history_next() {
+                    *line = next;
+                    redraw_line(line, &mut drawn);
+                }
+            }
+            b'\t' => {
+                if let Some(completed) = complete(line) {
+                    *line = completed;
+                    redraw_line(line, &mut drawn);
+                }
             }
             0x08 | 0x7f => {
                 if line.pop().is_some() {
                     print!("\u{8} \u{8}");
+                    drawn = drawn.saturating_sub(1);
+                    history_reset();
                 }
             }
             0x03 => {
                 println!("^C");
                 line.clear();
+                history_reset();
                 return false;
             }
             0x0c => {
                 console::clear_screen();
                 print!("{PROMPT}");
+                drawn = 0;
             }
             0x20..=0x7e if line.len() < 200 => {
                 line.push(byte as char);
                 print!("{}", byte as char);
+                drawn += 1;
+                history_reset();
             }
             _ => {}
         }
@@ -165,6 +332,8 @@ pub fn execute(line: &str, boot_info: &BootInfo) {
         "ping" => ping(rest),
         "dns" => dns(rest),
         "http" => http(rest),
+        "open" => open_url(rest),
+        "schemes" => schemes(),
         "beep" => beep(),
         "tone" => tone(rest),
         "disks" => disks(),
@@ -370,6 +539,11 @@ fn help() {
         ("ping <ip>", "send an ICMP echo request"),
         ("dns <name>", "resolve a host name"),
         ("http <url>", "fetch a page over HTTP"),
+        (
+            "open <url>",
+            "read a resource through a scheme (file:/ net:/ sys:/)",
+        ),
+        ("schemes", "list the available schemes and example URLs"),
         ("beep", "play a short tone through AC'97 audio"),
         ("tone <hz> [ms]", "play a tone of the given frequency"),
         ("disks", "list the ATA drives and their sizes"),
@@ -386,9 +560,10 @@ fn help() {
             "run [file]",
             "run a ring-3 program (no file: the built-in demo)",
         ),
+        ("run scheme", "demo the open/read/close syscalls in ring 3"),
         ("panic", "trigger a kernel panic (for testing)"),
         ("reboot", "reboot the machine"),
-        ("shutdown", "power off (QEMU) or halt"),
+        ("shutdown", "halt the machine"),
         ("pkg list", "list available packages"),
         ("pkg install <name>", "install a package"),
         ("pkg remove <name>", "remove a package"),
@@ -398,7 +573,7 @@ fn help() {
     println!("Commands:");
     for (name, description) in COMMANDS {
         console::set_fg(console::CYAN);
-        print!("  {name:<18}");
+        print!("  {name:<20}");
         console::set_fg(console::DIM);
         println!("{description}");
         console::set_fg(console::FG);
@@ -570,7 +745,7 @@ fn require_network() -> bool {
     console::set_fg(console::RED);
     println!("no network adapter is up");
     console::set_fg(console::FG);
-    println!("QEMU: -nic user,model=rtl8139; VirtualBox: an Intel 82540EM NIC");
+    println!("attach an RTL8139 or Intel 82540EM NIC to the VM");
     true
 }
 
@@ -676,6 +851,31 @@ fn dns(rest: &str) {
     console::set_fg(console::FG);
 }
 
+/// `open <url>`: reads any scheme resource and prints its text.
+fn open_url(rest: &str) {
+    if rest.is_empty() {
+        error(format_args!("usage: open <url> (try 'schemes')"));
+        return;
+    }
+    match crate::scheme::open(rest) {
+        Ok(resource) => {
+            println!("{} [{}]", resource.url, resource.mime);
+            for line in resource.text().lines() {
+                println!("{line}");
+            }
+        }
+        Err(message) => error(format_args!("open: {message}")),
+    }
+}
+
+/// `schemes`: prints the same help resource as `open sys:/help`.
+fn schemes() {
+    match crate::scheme::open("sys:/help") {
+        Ok(resource) => print!("{}", resource.text()),
+        Err(message) => error(format_args!("schemes: {message}")),
+    }
+}
+
 fn http(rest: &str) {
     let rest = rest.trim();
     if rest.is_empty() {
@@ -763,7 +963,7 @@ fn require_volume() -> bool {
         return true;
     }
     error(format_args!("no FAT16 volume is mounted"));
-    println!("boot QEMU with a data disk (the launcher attaches one automatically)");
+    println!("attach the gtos-data.img disk to the VM");
     false
 }
 
@@ -916,7 +1116,7 @@ fn play(name: &str) {
     }
     if !audio::is_up() {
         error(format_args!("no audio device is up"));
-        println!("boot QEMU with: -device AC97,audiodev=snd0");
+        println!("attach an AC'97 audio controller to the VM");
         return;
     }
     if !require_volume() {
@@ -972,6 +1172,8 @@ fn run_program(name: &str) {
 
     let (label, program) = if name.is_empty() {
         ("demo program", usermode::demo_program())
+    } else if name == "scheme" {
+        ("scheme demo", usermode::scheme_demo_program())
     } else {
         if !require_volume() {
             return;
@@ -1023,7 +1225,7 @@ fn beep() {
         console::set_fg(console::RED);
         println!("no audio device is up");
         console::set_fg(console::FG);
-        println!("boot QEMU with: -device AC97,audiodev=snd0");
+        println!("attach an AC'97 audio controller to the VM");
         return;
     }
     print!("beep ... ");
@@ -1052,17 +1254,32 @@ fn tone(rest: &str) {
         console::set_fg(console::FG);
         return;
     };
-    let milliseconds = parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(200)
-        .clamp(1, 5000);
+    if frequency == 0 {
+        console::set_fg(console::RED);
+        println!("invalid frequency: must be greater than zero");
+        console::set_fg(console::FG);
+        return;
+    }
+    let milliseconds = match parts.next() {
+        // An explicitly supplied but unparseable duration is an error: silently
+        // falling back to 200 ms would play something the user did not ask for.
+        Some(value) => {
+            let Ok(duration) = value.parse::<u32>() else {
+                console::set_fg(console::RED);
+                println!("invalid duration: {value}");
+                console::set_fg(console::FG);
+                return;
+            };
+            duration.clamp(1, audio::max_tone_ms())
+        }
+        None => 200,
+    };
 
     if !audio::is_up() {
         console::set_fg(console::RED);
         println!("no audio device is up");
         console::set_fg(console::FG);
-        println!("boot QEMU with: -device AC97,audiodev=snd0");
+        println!("attach an AC'97 audio controller to the VM");
         return;
     }
 
@@ -1088,10 +1305,7 @@ fn reboot() -> ! {
 }
 
 pub fn shutdown() -> ! {
-    println!("Powering off (QEMU isa-debug-exit); halting if unsupported...");
-    // QEMU's isa-debug-exit device: writing 0x10 here exits with status
-    // (0x10 << 1) | 1. On real hardware the write is harmless.
-    unsafe { x86_64::instructions::port::Port::<u32>::new(0xf4).write(0x10) };
+    println!("Halting the machine...");
     loop {
         x86_64::instructions::interrupts::disable();
         x86_64::instructions::hlt();

@@ -6,8 +6,8 @@
 //! burns the CPU on a task that is waiting, which is exactly the problem
 //! [`crate::task::executor::Executor`] solves.
 
-// The naive executor is kept for parity with `examples/async-await` and is only
-// exercised by this module's unit tests; the kernel uses the waker-based one.
+// The naive executor is only exercised by this module's unit tests; the kernel
+// uses the waker-based one.
 #![allow(dead_code)]
 
 use alloc::collections::VecDeque;

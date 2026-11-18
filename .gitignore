@@ -1,16 +1,5 @@
 /target
 /kernel/target
-/runner/target
-/examples/minimal/target
-/examples/vga-text/target
-/examples/testing/target
-/examples/cpu-exceptions/target
-/examples/double-faults/target
-/examples/hardware-interrupts/target
-/examples/paging/target
-/examples/heap-allocation/target
-/examples/allocator-designs/target
-/examples/async-await/target
 /serial.log
 /*.ppm
 /*.png

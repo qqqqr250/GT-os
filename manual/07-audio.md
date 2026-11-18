@@ -12,16 +12,14 @@ streams the samples. The shell waits for playback to finish (the driver polls th
 codec's current-index register) so the prompt returns only when the sound is
 done.
 
-QEMU's audio backend is selectable on the launcher:
+`scripts\virtualbox.ps1` creates the VM with host audio disabled, so there is no
+host speaker output to hear by default. Verify playback from the guest instead:
 
 ```powershell
-scripts\run.ps1 --audio wav       # default: record playback to audio.wav
-scripts\run.ps1 --audio dsound    # live output through DirectSound
-scripts\run.ps1 --audio none      # no audio device
+gtos> play BEEP.WAV
+playing BEEP.WAV (... bytes) ... done
 ```
 
-`wav` is the default because it always works, including on hosts where the
-DirectSound backend refuses to open a device; `dsound` gives you live sound when
-your host supports it. The smoke test uses the `wav` backend and asserts that the
-captured file contains real (non-zero) samples, which is how the driver is
-verified without a speaker.
+`done` means the WAV was parsed, DMA was set up and the codec reported playback
+complete. If you want to hear the guest's audio, enable audio in the VM's
+VirtualBox settings (Audio → Enable Audio) and start the VM again.

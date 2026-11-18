@@ -92,7 +92,7 @@ fn write_boot_sector(image: &mut [u8]) {
     boot[0] = 0xEB;
     boot[1] = 0x3C;
     boot[2] = 0x90;
-    boot[3..11].copy_from_slice(b"GTOS  ");
+    boot[3..11].copy_from_slice(b"GTOS    ");
     boot[11..13].copy_from_slice(&SECTOR_U16.to_le_bytes());
     boot[13] = SECTORS_PER_CLUSTER_U8;
     boot[14..16].copy_from_slice(&RESERVED_U16.to_le_bytes());
@@ -106,7 +106,7 @@ fn write_boot_sector(image: &mut [u8]) {
     boot[36] = 0x80;
     boot[38] = 0x29;
     boot[39..43].copy_from_slice(&0x5255_5354u32.to_le_bytes());
-    boot[43..54].copy_from_slice(b"GTOS     ");
+    boot[43..54].copy_from_slice(b"GTOS       ");
     boot[54..62].copy_from_slice(b"FAT16   ");
     boot[510] = 0x55;
     boot[511] = 0xAA;
