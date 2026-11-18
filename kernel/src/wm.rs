@@ -402,7 +402,7 @@ impl Desktop {
         let step = self.spawn_count % 6;
         self.spawn_count += 1;
         let x = (90 + step * 28).min(self.width.saturating_sub(w));
-        let y = (70 + step * 28).min((self.height - TASKBAR_HEIGHT).saturating_sub(h));
+        let y = (70 + step * 28).min(self.height.saturating_sub(TASKBAR_HEIGHT).saturating_sub(h));
 
         let idx = self.add_window(Window {
             rect: Rect { x, y, w, h },
@@ -886,7 +886,11 @@ impl Desktop {
                 }
                 // Read pixel from back buffer.
                 let r = unsafe { *back.add(off) };
-                let g = unsafe { *back.add(off + 1) };
+                let g = if bpp >= 2 {
+                    unsafe { *back.add(off + 1) }
+                } else {
+                    r
+                };
                 let b = if bpp >= 3 {
                     unsafe { *back.add(off + 2) }
                 } else {
@@ -953,7 +957,11 @@ impl Desktop {
                     continue;
                 }
                 let r = unsafe { *back.add(off) };
-                let g = unsafe { *back.add(off + 1) };
+                let g = if bpp >= 2 {
+                    unsafe { *back.add(off + 1) }
+                } else {
+                    r
+                };
                 let b = if bpp >= 3 {
                     unsafe { *back.add(off + 2) }
                 } else {
@@ -1048,7 +1056,7 @@ impl Desktop {
             (20usize, 20usize, "My Computer", Color(0xC0_C0_C0)),
             (20usize, 100usize, "My Documents", Color(0xFF_D7_00)),
             (20usize, 180usize, "Browser", Color(0x00_00_FF)),
-            (20usize, 260usize, "Recycle Bin", Color(0x80_80_80)),
+            (20usize, 260usize, "Terminal", Color(0x80_80_80)),
         ];
         for (ix, iy, label, color) in icons {
             // Icon (simple colored square with border).
@@ -1750,29 +1758,9 @@ impl Desktop {
             return;
         }
 
-        // Desktop icons.
-        let icons: [(usize, usize, &str, WindowContent); 4] = [
-            (20, 20, "My Computer", WindowContent::MyComputer),
-            (20, 100, "My Documents", WindowContent::MyDocuments),
-            (20, 180, "Browser", WindowContent::Browser),
-            (20, 260, "Recycle Bin", WindowContent::Terminal),
-        ];
-        for (ix, iy, _label, content) in icons {
-            if x >= ix && x < ix + 32 && y >= iy && y < iy + 48 {
-                self.spawn_window(
-                    match content {
-                        WindowContent::MyComputer => "My Computer",
-                        WindowContent::MyDocuments => "My Documents",
-                        WindowContent::Browser => "Browser",
-                        _ => "Terminal",
-                    },
-                    content,
-                );
-                return;
-            }
-        }
-
-        // Check windows (front to back).
+        // Check windows (front to back). Windows are drawn on top of the desktop
+        // icons, so they must also be hit-tested first; otherwise a click on an
+        // icon that a window covers would open the icon's app instead.
         for i in (0..self.windows.len()).rev() {
             let Some(w) = self.windows[i] else {
                 continue;
@@ -1867,6 +1855,29 @@ impl Desktop {
                 }
             }
             return;
+        }
+
+        // Desktop icons. Checked after the windows because windows are drawn on
+        // top of the icons.
+        let icons: [(usize, usize, &str, WindowContent); 4] = [
+            (20, 20, "My Computer", WindowContent::MyComputer),
+            (20, 100, "My Documents", WindowContent::MyDocuments),
+            (20, 180, "Browser", WindowContent::Browser),
+            (20, 260, "Terminal", WindowContent::Terminal),
+        ];
+        for (ix, iy, _label, content) in icons {
+            if x >= ix && x < ix + 32 && y >= iy && y < iy + 48 {
+                self.spawn_window(
+                    match content {
+                        WindowContent::MyComputer => "My Computer",
+                        WindowContent::MyDocuments => "My Documents",
+                        WindowContent::Browser => "Browser",
+                        _ => "Terminal",
+                    },
+                    content,
+                );
+                return;
+            }
         }
     }
 

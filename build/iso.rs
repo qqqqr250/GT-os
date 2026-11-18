@@ -309,11 +309,14 @@ fn boot_catalog(bios_lba: u32, bios_length: usize, uefi_lba: u32, uefi_length: u
 
     // Initial/default entry: the BIOS disk image, using hard-disk emulation so
     // that the guest sees it as a normal 512-byte-sector drive.
+    // The El Torito boot-catalog Sector Count is always counted in 512-byte
+    // virtual sectors, even for a hard-disk-emulation entry (the emulated drive
+    // exposes 512-byte sectors), so this uses `sectors_512`, not `sectors`.
     write_boot_entry(
         &mut catalog[32..64],
         MEDIA_HARD_DISK,
         bios_lba,
-        sectors(bios_length),
+        sectors_512(bios_length),
     );
 
     // Section header introducing the UEFI entry.

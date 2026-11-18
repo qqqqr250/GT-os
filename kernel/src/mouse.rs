@@ -172,8 +172,10 @@ pub fn buttons() -> u8 {
 }
 
 pub fn set_bounds(width: i32, height: i32) {
-    let x = MOUSE_X.load(Ordering::Relaxed).clamp(0, width - 1);
-    let y = MOUSE_Y.load(Ordering::Relaxed).clamp(0, height - 1);
+    // `width`/`height` come from the framebuffer size and are never zero in
+    // practice, but clamp to a valid range without an underflow either way.
+    let x = MOUSE_X.load(Ordering::Relaxed).clamp(0, width.max(1) - 1);
+    let y = MOUSE_Y.load(Ordering::Relaxed).clamp(0, height.max(1) - 1);
     MOUSE_X.store(x, Ordering::Relaxed);
     MOUSE_Y.store(y, Ordering::Relaxed);
 }
