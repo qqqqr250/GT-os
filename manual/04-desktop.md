@@ -14,11 +14,12 @@ flickering through a full-screen repaint:
 - a vertical blue gradient wallpaper,
 - a taskbar along the bottom with a green **start** button that opens a Start
   menu; the Start-menu entries open real windows (My Computer, Settings,
-  Command Prompt, Run..., About RustOS, Log Off, Shut Down), and the taskbar
+  Command Prompt, Run..., About GTos, Log Off, Shut Down), and the taskbar
   window buttons raise their window when clicked,
 - draggable windows with Luna-blue title bars, a close button (which frees the
   slot so a window can be reopened), and a drop shadow; the desktop starts empty
-  at boot and windows open on demand from the Start menu or the desktop icons,
+  at boot and windows open on demand from the Start menu, the desktop icons or
+  **F1** (Browser), while the Windows key toggles the Start menu,
 - a classic 12x19 arrow pointer whose hotspot is the top-left pixel.
 
 Input comes from `kernel\src\mouse.rs`, a PS/2 driver for the 8042 auxiliary

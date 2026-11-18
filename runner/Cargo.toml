@@ -1,9 +1,9 @@
 [package]
-name = "rustos-test-runner"
+name = "gtos-test-runner"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Runs the RustOS kernel's in-QEMU test binaries"
+description = "Runs the GTos kernel's in-QEMU test binaries"
 license = "MIT"
 publish = false
 

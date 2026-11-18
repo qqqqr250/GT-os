@@ -1,10 +1,10 @@
-# RustOS double-faults — `blog_os` post-06, done properly
+# GTos double-faults — `blog_os` post-06, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-06](https://github.com/phil-opp/blog_os/tree/post-06) — the
 *Double Faults* post, which catches a stack-overflow double fault on a dedicated
 interrupt stack — and rebuilds it as something you would actually ship. It is
-deliberately *not* part of the main RustOS workspace, so it can be built and
+deliberately *not* part of the main GTos workspace, so it can be built and
 tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

@@ -1,4 +1,4 @@
-//! In-QEMU stack-overflow test for the `RustOS` kernel.
+//! In-QEMU stack-overflow test for the `GTos` kernel.
 //!
 //! This is post-06's `tests/stack_overflow.rs`: the test recurses until the
 //! guard page below the kernel stack is hit and asserts that the *double fault*

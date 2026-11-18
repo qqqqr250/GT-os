@@ -1,8 +1,8 @@
-//! In-QEMU tests for the post-12 async hook in `rustos-hardware-interrupts`.
+//! In-QEMU tests for the post-12 async hook in `gtos-hardware-interrupts`.
 //!
 //! The crate is post-07, so its focus is the PIC/PIT/keyboard, but it also
 //! carries post-08's paging, post-10's heap and post-12's task runtime forward.
-//! This test drives the [`task`](rustos_hardware_interrupts::task) module's
+//! This test drives the [`task`](gtos_hardware_interrupts::task) module's
 //! *public* API: `cargo test` links this file for `x86_64-unknown-none`, the
 //! runner in `runner/` wraps it in a bootable disk image, and QEMU reports
 //! pass/fail through the `isa-debug-exit` device.
@@ -23,7 +23,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![test_runner(rustos_hardware_interrupts::test_runner)]
+#![test_runner(gtos_hardware_interrupts::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 // The tasks allocate through the global allocator, so the test needs the `alloc`
@@ -36,11 +36,11 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 use futures_util::StreamExt;
-use rustos_hardware_interrupts::task::Task;
-use rustos_hardware_interrupts::task::executor::Executor;
-use rustos_hardware_interrupts::task::keyboard::{self, ScancodeStream};
-use rustos_hardware_interrupts::task::simple_executor::SimpleExecutor;
-use rustos_hardware_interrupts::{allocator, halt_forever, memory, serial};
+use gtos_hardware_interrupts::task::Task;
+use gtos_hardware_interrupts::task::executor::Executor;
+use gtos_hardware_interrupts::task::keyboard::{self, ScancodeStream};
+use gtos_hardware_interrupts::task::simple_executor::SimpleExecutor;
+use gtos_hardware_interrupts::{allocator, halt_forever, memory, serial};
 
 static TEST_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -54,7 +54,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::init();
     // Install the GDT/TSS and the IDT/PIC/PIT before the harness runs: the timer
     // test needs the tick to be live and the GDT test needs the TSS.
-    rustos_hardware_interrupts::init();
+    gtos_hardware_interrupts::init();
 
     let offset = boot_info
         .physical_memory_offset
@@ -72,12 +72,12 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_hardware_interrupts::test_panic_handler(info)
+    gtos_hardware_interrupts::test_panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_hardware_interrupts::alloc_error_handler(layout)
+    gtos_hardware_interrupts::alloc_error_handler(layout)
 }
 
 #[test_case]

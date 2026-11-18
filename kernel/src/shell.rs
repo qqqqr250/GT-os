@@ -11,7 +11,7 @@ use bootloader_api::info::{BootInfo, MemoryRegionKind};
 use crate::console::{print, println};
 use crate::{ata, audio, console, fat, input, interrupts, memory, net, task, usermode};
 
-const PROMPT: &str = "rustos> ";
+const PROMPT: &str = "gtos> ";
 const BANNER_WIDTH: usize = 62;
 
 /// Prints `count` copies of `ch` without allocating.
@@ -32,10 +32,10 @@ pub fn banner() {
     println!("+");
 
     let right = "x86_64 bare metal";
-    let pad = BANNER_WIDTH.saturating_sub(4 + "RUSTOS".len() + right.len());
+    let pad = BANNER_WIDTH.saturating_sub(4 + "GTOS".len() + right.len());
     print!("|  ");
     console::set_fg(console::CYAN);
-    print!("RUSTOS");
+    print!("GTOS");
     console::set_fg(console::FG);
     fill(' ', pad);
     println!("{right}  |");
@@ -211,7 +211,7 @@ static mut PACKAGES: [Package; 8] = [
     Package {
         name: "about",
         version: "1.0",
-        description: "About RustOS information window",
+        description: "About GTos information window",
         installed: true,
     },
     Package {
@@ -542,7 +542,7 @@ fn cpuid_brand() -> Option<String> {
 }
 
 fn about() {
-    println!("RustOS is a small x86_64 kernel written entirely in Rust.");
+    println!("GTos is a small x86_64 kernel written entirely in Rust.");
     println!("It boots via the rust-osdev bootloader (BIOS or UEFI), owns the");
     println!("framebuffer, heap, IDT, PIC and PIT, and serves this shell over");
     println!("the PS/2 keyboard and COM1. No Linux, no std, no libc.");

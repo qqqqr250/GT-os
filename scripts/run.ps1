@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Boots RustOS in QEMU.
+    Boots GTos in QEMU.
 
 .DESCRIPTION
     Passes everything after the script name to the launcher, e.g.:

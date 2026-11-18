@@ -72,8 +72,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\async-await\target\$target\$buildProfile\rustos-async-await"
-    $image = "target\async-await\rustos-async-await-bios.img"
+    $elf = "examples\async-await\target\$target\$buildProfile\gtos-async-await"
+    $image = "target\async-await\gtos-async-await-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

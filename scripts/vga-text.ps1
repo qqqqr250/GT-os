@@ -59,8 +59,8 @@ try {
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
     $manifest = 'examples\vga-text\Cargo.toml'
     $target = 'x86_64-unknown-none'
-    $elf = "examples\vga-text\target\$target\$buildProfile\rustos-vga-text"
-    $image = "target\vga-text\rustos-vga-text-bios.img"
+    $elf = "examples\vga-text\target\$target\$buildProfile\gtos-vga-text"
+    $image = "target\vga-text\gtos-vga-text-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

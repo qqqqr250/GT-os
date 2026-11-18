@@ -1,10 +1,10 @@
 # Bootable ISO and Ventoy
 
-`cargo build` also writes `rustos.iso` next to the disk images, under
-`target\<profile>\build\rustos\<hash>\out\`:
+`cargo build` also writes `gtos.iso` next to the disk images, under
+`target\<profile>\build\gtos\<hash>\out\`:
 
 ```
-target\debug\build\rustos\*\out\rustos.iso
+target\debug\build\gtos\*\out\gtos.iso
 ```
 
 The ISO is written by `build\iso.rs`, a small dependency-free ISO9660 + El
@@ -25,8 +25,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1 uefi iso
 ## Using the ISO on a Ventoy USB stick
 
 1. Build it (`scripts\build.ps1`, or `scripts\build.ps1 --release`).
-2. Copy `rustos.iso` to the first, exFAT/NTFS partition of a Ventoy drive.
-3. Boot the drive and pick `rustos.iso` from the Ventoy menu.
+2. Copy `gtos.iso` to the first, exFAT/NTFS partition of a Ventoy drive.
+3. Boot the drive and pick `gtos.iso` from the Ventoy menu.
 
 Ventoy's UEFI path reads the EFI El Torito entry and chainloads its own
 `ventoy_x86_64.efi`; this has been verified in QEMU (`scripts\smoke-test.ps1
@@ -43,6 +43,6 @@ needs. That path has **not** been tested on real hardware.
 
 ## Ventoy fallback: raw disk images
 
-Ventoy also boots raw `.img` files, so `rustos-bios.img` and `rustos-uefi.img`
+Ventoy also boots raw `.img` files, so `gtos-bios.img` and `gtos-uefi.img`
 can be copied to the drive directly if you prefer not to use the ISO. Pick the
 image that matches the firmware you are booting.

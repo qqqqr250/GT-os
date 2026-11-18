@@ -1,10 +1,10 @@
-# RustOS cpu-exceptions — `blog_os` post-05, done properly
+# GTos cpu-exceptions — `blog_os` post-05, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-05](https://github.com/phil-opp/blog_os/tree/post-05) — the
 *CPU Exceptions* post, which installs an interrupt descriptor table (IDT) and a
 breakpoint handler — and rebuilds it as something you would actually ship. It is
-deliberately *not* part of the main RustOS workspace, so it can be built and
+deliberately *not* part of the main GTos workspace, so it can be built and
 tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

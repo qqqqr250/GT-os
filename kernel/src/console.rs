@@ -11,7 +11,7 @@ use crate::font::{FONT, FONT_HEIGHT, FONT_WIDTH};
 use crate::serial;
 
 /// A 24-bit `0xRRGGBB` color.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub u32);
 
 impl Color {

@@ -1,10 +1,10 @@
-# RustOS hardware-interrupts — `blog_os` post-07, done properly
+# GTos hardware-interrupts — `blog_os` post-07, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-07](https://github.com/phil-opp/blog_os/tree/post-07) — the
 *Hardware Interrupts* post, which wires the 8259 PIC up so the timer and the
 keyboard can interrupt the CPU — and rebuilds it as something you would actually
-ship. It is deliberately *not* part of the main RustOS workspace, so it can be
+ship. It is deliberately *not* part of the main GTos workspace, so it can be
 built and tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

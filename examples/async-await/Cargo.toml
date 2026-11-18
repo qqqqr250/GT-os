@@ -1,5 +1,5 @@
 [package]
-name = "rustos-async-await"
+name = "gtos-async-await"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,7 +7,7 @@ description = "blog_os post-12, done properly: a minimal bare-metal kernel with 
 license = "MIT"
 publish = false
 
-# Standalone on purpose: this teaching crate must not join the RustOS workspace,
+# Standalone on purpose: this teaching crate must not join the GTos workspace,
 # so it can be built and tested on its own (its `cargo test` boots QEMU, see the
 # crate README).
 [workspace]
@@ -24,12 +24,12 @@ pedantic = "warn"
 # post-04..post-11 examples it is *always* `no_std`: every test runs inside QEMU
 # through the custom test framework, not on the host.
 [lib]
-name = "rustos_async_await"
+name = "gtos_async_await"
 path = "src/lib.rs"
 
 # The bootable kernel binary, built for `x86_64-unknown-none`.
 [[bin]]
-name = "rustos-async-await"
+name = "gtos-async-await"
 path = "src/main.rs"
 test = false
 bench = false

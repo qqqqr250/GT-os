@@ -1,4 +1,4 @@
-//! In-QEMU test for the `rustos-cpu-exceptions` IDT.
+//! In-QEMU test for the `gtos-cpu-exceptions` IDT.
 //!
 //! The unit tests in `src/lib.rs` exercise the vector table from inside the
 //! library. This test does the same through the crate's *public* API, from a
@@ -17,16 +17,16 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_cpu_exceptions::test_runner)]
+#![test_runner(gtos_cpu_exceptions::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_cpu_exceptions::interrupts::{
+use gtos_cpu_exceptions::interrupts::{
     Vector, exception_count, init, last_vector, trigger_breakpoint,
 };
-use rustos_cpu_exceptions::{halt_forever, serial, serial_println};
+use gtos_cpu_exceptions::{halt_forever, serial, serial_println};
 
 static TEST_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
 
@@ -43,7 +43,7 @@ fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_cpu_exceptions::test_panic_handler(info)
+    gtos_cpu_exceptions::test_panic_handler(info)
 }
 
 #[test_case]

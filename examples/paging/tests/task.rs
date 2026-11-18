@@ -1,8 +1,8 @@
-//! In-QEMU tests for the post-12 async hook in `rustos-paging`.
+//! In-QEMU tests for the post-12 async hook in `gtos-paging`.
 //!
 //! The crate is post-08+09, so its focus is paging, but it also carries post-10's
 //! heap and post-12's task runtime forward. This test drives the
-//! [`task`](rustos_paging::task) module's *public* API: `cargo test` links this
+//! [`task`](gtos_paging::task) module's *public* API: `cargo test` links this
 //! file for `x86_64-unknown-none`, the runner in `runner/` wraps it in a bootable
 //! disk image, and QEMU reports pass/fail through the `isa-debug-exit` device.
 //!
@@ -22,7 +22,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![test_runner(rustos_paging::test_runner)]
+#![test_runner(gtos_paging::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 // The tasks allocate through the global allocator, so the test needs the `alloc`
@@ -35,11 +35,11 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 use futures_util::StreamExt;
-use rustos_paging::task::Task;
-use rustos_paging::task::executor::Executor;
-use rustos_paging::task::keyboard::{self, ScancodeStream};
-use rustos_paging::task::simple_executor::SimpleExecutor;
-use rustos_paging::{allocator, halt_forever, memory, serial};
+use gtos_paging::task::Task;
+use gtos_paging::task::executor::Executor;
+use gtos_paging::task::keyboard::{self, ScancodeStream};
+use gtos_paging::task::simple_executor::SimpleExecutor;
+use gtos_paging::{allocator, halt_forever, memory, serial};
 
 static TEST_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -53,7 +53,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::init();
     // The GDT/TSS must be loaded before the IDT names the double-fault IST slot,
     // and `init` remaps the PIC, starts the PIT and enables interrupts.
-    rustos_paging::init();
+    gtos_paging::init();
 
     let offset = boot_info
         .physical_memory_offset
@@ -71,12 +71,12 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_paging::test_panic_handler(info)
+    gtos_paging::test_panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_paging::alloc_error_handler(layout)
+    gtos_paging::alloc_error_handler(layout)
 }
 
 #[test_case]

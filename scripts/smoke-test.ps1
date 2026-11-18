@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Boots RustOS headlessly in QEMU, drives the shell over COM1 and asserts on
+    Boots GTos headlessly in QEMU, drives the shell over COM1 and asserts on
     the transcript. This is the project's integration test.
 
 .DESCRIPTION
@@ -135,11 +135,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
     $image = if ($Iso) {
-        Get-ChildItem -Path (Join-Path $projectRoot "target\$buildProfile") -Recurse -Filter 'rustos.iso' -ErrorAction Stop |
+        Get-ChildItem -Path (Join-Path $projectRoot "target\$buildProfile") -Recurse -Filter 'gtos.iso' -ErrorAction Stop |
             Sort-Object LastWriteTime |
             Select-Object -Last 1
     } else {
-        Get-ChildItem -Path (Join-Path $projectRoot "target\$buildProfile") -Recurse -Filter "rustos-$Firmware.img" -ErrorAction Stop |
+        Get-ChildItem -Path (Join-Path $projectRoot "target\$buildProfile") -Recurse -Filter "gtos-$Firmware.img" -ErrorAction Stop |
             Sort-Object LastWriteTime |
             Select-Object -Last 1
     }
@@ -150,13 +150,13 @@ try {
     # Guest audio is captured here so the AC'97 driver can be verified. The
     # path must not contain spaces: Start-Process joins the argument array with
     # spaces and does not quote.
-    $audioPath = Join-Path $env:TEMP 'rustos-smoke-audio.wav'
+    $audioPath = Join-Path $env:TEMP 'gtos-smoke-audio.wav'
     Remove-Item -LiteralPath $audioPath -ErrorAction SilentlyContinue
 
-    # The RustOS data disk rides on the primary IDE slave, exactly as the
+    # The GTos data disk rides on the primary IDE slave, exactly as the
     # launcher attaches it. The test works on a throwaway copy so the project's
-    # own rustos-data.img is never modified.
-    $dataImage = Join-Path $projectRoot 'rustos-data.img'
+    # own gtos-data.img is never modified.
+    $dataImage = Join-Path $projectRoot 'gtos-data.img'
     if (-not (Test-Path -LiteralPath $dataImage)) {
         throw "the data disk was not created at $dataImage (run 'cargo build' first)"
     }
@@ -177,7 +177,7 @@ try {
     # prompt. Keep the default VGA adapter: the bootloader needs VBE, so
     # `-vga none` produces no output at all.
     $qemuArgs = @(
-        '-name', "RustOS-smoke-test-$Firmware",
+        '-name', "GTos-smoke-test-$Firmware",
         '-m', '256M',
         '-smp', '1',
         '-no-reboot',
@@ -239,13 +239,13 @@ try {
     for ($attempt = 0; $attempt -lt 10 -and -not $prompted; $attempt++) {
         Set-Mark
         Send-Line ''
-        $prompted = Wait-For 'rustos> ' 3
+        $prompted = Wait-For 'gtos> ' 3
     }
     if (-not $prompted) { $failures.Add('shell prompt never appeared') }
 
     $checks = @(
         @{ Command = 'help'; Expect = 'shutdown' },
-        @{ Command = 'echo hello-from-rustos'; Expect = 'hello-from-rustos' },
+        @{ Command = 'echo hello-from-gtos'; Expect = 'hello-from-gtos' },
         @{ Command = 'cpu'; Expect = 'vendor:' },
         @{ Command = 'mem'; Expect = 'usable' },
         @{ Command = 'heap'; Expect = 'heap: 0x' },
@@ -281,7 +281,7 @@ try {
         if (-not (Wait-For $check.Expect)) {
             $failures.Add("command '$($check.Command)' did not produce '$($check.Expect)'")
         }
-        [void](Wait-For 'rustos> ')
+        [void](Wait-For 'gtos> ')
     }
 
     Set-Mark

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Boots RustOS headlessly and captures the Windows XP-style desktop to
+    Boots GTos headlessly and captures the Windows XP-style desktop to
     target\screenshot.png.
 
 .DESCRIPTION
@@ -33,7 +33,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'env.ps1')
 $qemu = (Get-Command qemu-system-x86_64 -ErrorAction Stop).Source
 $root = $projectRoot
-$image = Get-ChildItem -Path "$root\target" -Recurse -Filter "rustos-$Firmware.img" |
+$image = Get-ChildItem -Path "$root\target" -Recurse -Filter "gtos-$Firmware.img" |
     Sort-Object LastWriteTime | Select-Object -Last 1
 if (-not $image) { throw "the $Firmware disk image was not found under target\" }
 
@@ -46,7 +46,7 @@ $monitorPort = Get-FreePort
 
 $png = Join-Path $root 'target\screenshot.png'
 # `screendump` cannot handle spaces in the path; %TEMP% is space-free here.
-$ppm = Join-Path $env:TEMP 'rustos-screenshot.ppm'
+$ppm = Join-Path $env:TEMP 'gtos-screenshot.ppm'
 
 $qemuArgs = @(
     '-m', '256M', '-smp', '1', '-no-reboot',
@@ -72,7 +72,7 @@ if ($Firmware -eq 'uefi') {
 }
 
 $qemuArgs += @('-drive', "`"format=raw,file=$($image.FullName)`"")
-$dataImage = Join-Path $root 'rustos-data.img'
+$dataImage = Join-Path $root 'gtos-data.img'
 if (Test-Path -LiteralPath $dataImage) {
     $qemuArgs += @('-drive', "`"if=ide,index=1,format=raw,file=$dataImage`"")
 }

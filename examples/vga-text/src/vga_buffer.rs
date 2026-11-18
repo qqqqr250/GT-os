@@ -581,11 +581,11 @@ mod tests {
     #[test]
     fn writes_characters_and_advances_the_cursor() {
         let mut writer = writer();
-        writer.write_string("RustOS");
-        assert_eq!(char_at(&writer, 0, 0), b'R');
-        assert_eq!(char_at(&writer, 0, 5), b'S');
+        writer.write_string("GTos");
+        assert_eq!(char_at(&writer, 0, 0), b'G');
+        assert_eq!(char_at(&writer, 0, 3), b's');
         assert_eq!(writer.row, 0);
-        assert_eq!(writer.column, 6);
+        assert_eq!(writer.column, 4);
     }
 
     #[test]

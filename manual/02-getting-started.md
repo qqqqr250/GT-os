@@ -49,7 +49,7 @@ powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Firmware uefi -
 Equivalent raw commands, if you prefer not to use the PowerShell wrappers:
 
 ```powershell
-cargo build                 # produces target\debug\build\rustos\*\out\rustos-{bios,uefi}.img and rustos.iso
+cargo build                 # produces target\debug\build\gtos\*\out\gtos-{bios,uefi}.img and gtos.iso
 cargo run -- bios --headless
 cargo run -- uefi iso       # boot the ISO from a virtual CD-ROM
 ```

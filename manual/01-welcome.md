@@ -1,10 +1,10 @@
-# Welcome to RustOS!
+# Welcome to GTos!
 
 A small, bootable x86_64 operating system written from scratch in Rust. No
 Linux, no `std`, no libc: the kernel owns the machine from the moment the
 bootloader hands over the CPU until `shutdown`.
 
-![RustOS running in QEMU](../docs/screenshot.png)
+![GTos running in QEMU](../docs/screenshot.png)
 
 It boots on legacy BIOS **and** UEFI from the same kernel binary, draws a
 framebuffer text console with its own 8x8 font renderer, mirrors everything to
@@ -16,9 +16,9 @@ interactive shell over the PS/2 keyboard or a serial line.
 - **Bare-metal kernel** (`#![no_std]`, `#![no_main]`, `x86_64-unknown-none`)
   entered through the `bootloader` 0.11 API, which provides BootInfo, a
   framebuffer, identity-free physical-memory mapping and a kernel stack.
-- **One kernel, two firmware paths** – the build produces `rustos-bios.img` and
-  `rustos-uefi.img`.
-- **Bootable ISO** – the same kernel also ships as `rustos.iso`, a hand-written
+- **One kernel, two firmware paths** – the build produces `gtos-bios.img` and
+  `gtos-uefi.img`.
+- **Bootable ISO** – the same kernel also ships as `gtos.iso`, a hand-written
   ISO9660 + El Torito disc image that boots under UEFI and is Ventoy-compatible.
 - **Framebuffer console** – 8x8 bitmap font, scaled 1x–3x to target ~80 columns,
   ANSI-free colour palette, scrolling, tab/backspace/CR/LF handling, and a

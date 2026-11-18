@@ -1,4 +1,4 @@
-//! The bootable binary: the bootloader's entry point into the `rustos-testing`
+//! The bootable binary: the bootloader's entry point into the `gtos-testing`
 //! library.
 //!
 //! All of the logic lives in the library (`src/lib.rs`); this file only owns the
@@ -27,10 +27,10 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_testing::kernel_main(boot_info)
+    gtos_testing::kernel_main(boot_info)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    rustos_testing::panic_handler(info)
+    gtos_testing::panic_handler(info)
 }

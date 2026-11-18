@@ -1,4 +1,4 @@
-//! The bootable binary: the bootloader's entry point into the `rustos-paging`
+//! The bootable binary: the bootloader's entry point into the `gtos-paging`
 //! library.
 //!
 //! All of the logic lives in the library (`src/lib.rs`); this file only owns the
@@ -27,15 +27,15 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_paging::kernel_main(boot_info)
+    gtos_paging::kernel_main(boot_info)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    rustos_paging::panic_handler(info)
+    gtos_paging::panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_paging::alloc_error_handler(layout)
+    gtos_paging::alloc_error_handler(layout)
 }

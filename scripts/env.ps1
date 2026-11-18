@@ -1,4 +1,4 @@
-# Shared environment for the RustOS helper scripts.
+# Shared environment for the GTos helper scripts.
 #
 # The toolchain lives outside the project (rustup, MinGW-w64, QEMU), so every
 # script dot-sources this file to put the pieces on PATH for its own session

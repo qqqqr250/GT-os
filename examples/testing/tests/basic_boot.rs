@@ -1,4 +1,4 @@
-//! In-QEMU boot tests for the `rustos-testing` crate.
+//! In-QEMU boot tests for the `gtos-testing` crate.
 //!
 //! Cargo links this file into a bare-metal test binary, the runner in `runner/`
 //! wraps it in a bootable disk image, and QEMU reports pass/fail through the
@@ -12,7 +12,7 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_testing::test_runner)]
+#![test_runner(gtos_testing::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_testing::serial_println;
+use gtos_testing::serial_println;
 
 /// The physical-memory window the bootloader reported, read by the tests.
 static PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
@@ -36,17 +36,17 @@ static TEST_CONFIG: BootloaderConfig = {
 entry_point!(test_kernel_main, config = &TEST_CONFIG);
 
 fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_testing::serial::init();
+    gtos_testing::serial::init();
     if let Some(offset) = boot_info.physical_memory_offset.into_option() {
         PHYSICAL_MEMORY_OFFSET.store(offset, Ordering::Relaxed);
     }
     test_main();
-    rustos_testing::halt_forever()
+    gtos_testing::halt_forever()
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_testing::test_panic_handler(info)
+    gtos_testing::test_panic_handler(info)
 }
 
 #[test_case]

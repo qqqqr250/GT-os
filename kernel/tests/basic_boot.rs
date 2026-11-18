@@ -1,4 +1,4 @@
-//! In-QEMU boot tests for the `RustOS` kernel.
+//! In-QEMU boot tests for the `GTos` kernel.
 //!
 //! Run them with `cargo xtest` (or
 //! `cargo test --manifest-path kernel\Cargo.toml --target x86_64-unknown-none`).
@@ -138,7 +138,7 @@ fn test_printing_during_timer_interrupts_does_not_deadlock() {
     let start = kernel::testing::ticks();
     let deadline = start + 30; // ~300 ms at 100 Hz, i.e. at least 3 dots
     while kernel::testing::ticks() < deadline {
-        kernel::testing::console_println("RustOS: printing under timer interrupts");
+        kernel::testing::console_println("GTos: printing under timer interrupts");
     }
     kernel::testing::set_timer_dots(false);
 
@@ -174,7 +174,7 @@ fn test_vga_fallback_path_is_usable() {
     // Exercise the volatile device writes. Their effect is only observable when
     // the firmware left the machine in text mode, which the bootloader does not
     // do under QEMU, so this only proves the path does not fault.
-    kernel::testing::vga_write("RustOS");
+    kernel::testing::vga_write("GTos");
     kernel::testing::vga_clear();
 
     // Out-of-range reads are always blank.

@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-minimal"
+name = "gtos-minimal"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",

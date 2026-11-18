@@ -1,10 +1,10 @@
-# RustOS minimal — `blog_os` post-02, done properly
+# GTos minimal — `blog_os` post-02, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-02](https://github.com/phil-opp/blog_os/tree/post-02) — the
 kernel that writes `"Hello World!"` to the VGA text buffer at `0xb8000` — and
 rebuilds it as something you would actually ship. It is deliberately *not* part
-of the main RustOS workspace, so it can be built and tested on its own.
+of the main GTos workspace, so it can be built and tested on its own.
 
 > Its siblings are [`examples/vga-text`](../vga-text/README.md), the same treatment
 > for [`blog_os` post-03](https://github.com/phil-opp/blog_os/tree/post-03) (the
@@ -103,5 +103,5 @@ arguments after `--`.
 > the legacy text aperture at `0xb8000` is not backed — writing to it changes
 > nothing on screen. The kernel notices this and says so, and COM1 carries the
 > real output. On a machine whose firmware leaves the console in text mode the
-> same code draws the banner on screen. This is exactly the situation RustOS's own
+> same code draws the banner on screen. This is exactly the situation GTos's own
 > [`vga`](../../kernel/src/vga.rs) fallback handles.

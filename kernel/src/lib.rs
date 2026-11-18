@@ -1,4 +1,4 @@
-//! `RustOS` kernel library.
+//! `GTos` kernel library.
 //!
 //! The crate is split into this library plus a thin binary (`src/main.rs`) so
 //! that the kernel logic can be exercised by an in-QEMU test framework: the
@@ -271,7 +271,7 @@ fn init_audio(physical_memory_offset: u64) {
 
 /// Detects the ATA drives and mounts the FAT16 data disk.
 ///
-/// QEMU attaches the boot disk as the primary master (drive 0) and the `RustOS`
+/// QEMU attaches the boot disk as the primary master (drive 0) and the `GTos`
 /// data disk as the primary slave (drive 1). The kernel only mounts a volume it
 /// finds on the slave, so a plain boot disk is left untouched.
 fn init_disks() {

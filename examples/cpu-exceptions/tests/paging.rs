@@ -1,4 +1,4 @@
-//! In-QEMU test for the post-08 paging hook in `rustos-cpu-exceptions`.
+//! In-QEMU test for the post-08 paging hook in `gtos-cpu-exceptions`.
 //!
 //! The crate is post-05, so its focus is the IDT, but it also carries post-07's
 //! PIC/PIT and post-08's [`memory`] module forward. This test proves the paging
@@ -19,14 +19,14 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_cpu_exceptions::test_runner)]
+#![test_runner(gtos_cpu_exceptions::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_cpu_exceptions::{halt_forever, interrupts, memory, serial};
+use gtos_cpu_exceptions::{halt_forever, interrupts, memory, serial};
 
 /// A free virtual page (`PML4` index 144) the mapping test uses.
 const TEST_PAGE: u64 = 0x0000_4800_0000_0000;
@@ -59,7 +59,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_cpu_exceptions::test_panic_handler(info)
+    gtos_cpu_exceptions::test_panic_handler(info)
 }
 
 #[test_case]

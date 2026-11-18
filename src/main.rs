@@ -100,7 +100,7 @@ fn build_command(qemu: &Path, options: &Options) -> Result<Command, ExitCode> {
     let mut command = Command::new(qemu);
     command
         .arg("-name")
-        .arg("RustOS")
+        .arg("GTos")
         .arg("-m")
         .arg("256M")
         .arg("-smp")
@@ -154,7 +154,7 @@ fn build_command(qemu: &Path, options: &Options) -> Result<Command, ExitCode> {
         println!("booting BIOS disk image {BIOS_IMAGE}");
     }
 
-    // The RustOS data disk rides on the primary IDE slave, which is drive 1 for
+    // The GTos data disk rides on the primary IDE slave, which is drive 1 for
     // the kernel's ATA driver. It is the same file the build script seeds with
     // README.TXT and BEEP.WAV, so writes from the guest persist between boots.
     command
@@ -237,7 +237,7 @@ fn run(mut command: Command) -> ExitCode {
 }
 
 fn print_help() {
-    println!("RustOS launcher");
+    println!("GTos launcher");
     println!();
     println!(
         "usage: cargo run -- [bios|uefi] [disk|iso] [--headless] [--audio <backend>] [-- <extra QEMU args>]"

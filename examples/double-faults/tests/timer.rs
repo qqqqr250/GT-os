@@ -1,4 +1,4 @@
-//! In-QEMU test for the post-07 hardware-interrupt hook in `rustos-double-faults`.
+//! In-QEMU test for the post-07 hardware-interrupt hook in `gtos-double-faults`.
 //!
 //! The crate is post-06, so its focus is the double-fault handler and its IST
 //! stack, but [`interrupts::init`] also brings forward post-07's PIC/PIT setup.
@@ -17,13 +17,13 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_double_faults::test_runner)]
+#![test_runner(gtos_double_faults::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_double_faults::{gdt, halt_forever, interrupts, pic, pit, serial};
+use gtos_double_faults::{gdt, halt_forever, interrupts, pic, pit, serial};
 
 static TEST_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
 
@@ -42,7 +42,7 @@ fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_double_faults::test_panic_handler(info)
+    gtos_double_faults::test_panic_handler(info)
 }
 
 #[test_case]

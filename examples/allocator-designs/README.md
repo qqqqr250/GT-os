@@ -1,10 +1,10 @@
-# RustOS allocator-designs — `blog_os` post-11, done properly
+# GTos allocator-designs — `blog_os` post-11, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-11](https://github.com/phil-opp/blog_os/tree/post-11) — the
 *Allocator Designs* post, which replaces the `linked_list_allocator` heap of
 post-10 with three allocators written from scratch — and rebuilds it as something
-you would actually ship. It is deliberately *not* part of the main RustOS
+you would actually ship. It is deliberately *not* part of the main GTos
 workspace, so it can be built and tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

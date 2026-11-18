@@ -1,4 +1,4 @@
-//! In-QEMU tests for the `rustos-hardware-interrupts` kernel.
+//! In-QEMU tests for the `gtos-hardware-interrupts` kernel.
 //!
 //! These drive the crate's *public* API from a separate test binary: `cargo test`
 //! links this file for `x86_64-unknown-none`, the runner in `runner/` wraps it in
@@ -15,13 +15,13 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_hardware_interrupts::test_runner)]
+#![test_runner(gtos_hardware_interrupts::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_hardware_interrupts::{
+use gtos_hardware_interrupts::{
     gdt, halt_forever, interrupts, keyboard, pic, pit, serial, serial_println,
 };
 
@@ -42,7 +42,7 @@ fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_hardware_interrupts::test_panic_handler(info)
+    gtos_hardware_interrupts::test_panic_handler(info)
 }
 
 #[test_case]

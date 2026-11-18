@@ -16,14 +16,14 @@
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_testing::{QemuExitCode, exit_qemu, serial_print, serial_println};
+use gtos_testing::{QemuExitCode, exit_qemu, serial_print, serial_println};
 
 static TEST_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
 
 entry_point!(test_kernel_main, config = &TEST_CONFIG);
 
 fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
-    rustos_testing::serial::init();
+    gtos_testing::serial::init();
     should_fail();
     serial_println!("[test did not panic]");
     exit_qemu(QemuExitCode::Failed);

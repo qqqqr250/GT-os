@@ -1,6 +1,6 @@
 //! Ring-3 user mode.
 //!
-//! `RustOS` runs programs with real hardware isolation. The kernel owns the GDT,
+//! `GTos` runs programs with real hardware isolation. The kernel owns the GDT,
 //! a TSS with a dedicated ring-0 stack, and a private page-table window at
 //! [`USER_BASE`] that is the only memory a user program can reach. The single
 //! system-call gate is `int 0x80`.

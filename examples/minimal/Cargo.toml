@@ -1,5 +1,5 @@
 [package]
-name = "rustos-minimal"
+name = "gtos-minimal"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,7 +7,7 @@ description = "blog_os post-02, done properly: a minimal bare-metal kernel with 
 license = "MIT"
 publish = false
 
-# Standalone on purpose: this teaching crate must not join the RustOS workspace,
+# Standalone on purpose: this teaching crate must not join the GTos workspace,
 # so it can be built and tested on its own (its `cargo test` runs on the host,
 # see the crate README).
 [workspace]
@@ -22,12 +22,12 @@ pedantic = "warn"
 # The library holds the console; it builds `no_std` for the kernel and as a
 # normal `std` crate for `cargo test`.
 [lib]
-name = "rustos_minimal"
+name = "gtos_minimal"
 path = "src/lib.rs"
 
 # The bootable kernel binary, built for `x86_64-unknown-none`.
 [[bin]]
-name = "rustos-minimal"
+name = "gtos-minimal"
 path = "src/main.rs"
 test = false
 bench = false

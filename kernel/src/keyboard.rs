@@ -74,6 +74,8 @@ pub fn handle_scancode(scancode: u8) {
                 CAPS_LOCK.fetch_xor(true, Ordering::Relaxed);
             }
         }
+        // F1 is a desktop shortcut for opening the Browser window.
+        0x3b if !released => input::push(input::KEY_BROWSER),
         _ if !released => {
             let Some(&normal) = NORMAL.get(code as usize) else {
                 return;
@@ -128,6 +130,17 @@ mod tests {
 
         handle_scancode(0xe0);
         handle_scancode(0xdc); // right Windows break
+        assert_eq!(input::pop(), None);
+    }
+
+    #[test_case]
+    fn f1_opens_the_browser_and_release_does_not_queue_again() {
+        drain_input();
+        handle_scancode(0x3b); // F1 make
+        assert_eq!(input::pop(), Some(input::KEY_BROWSER));
+        assert_eq!(input::pop(), None);
+
+        handle_scancode(0xbb); // F1 break
         assert_eq!(input::pop(), None);
     }
 }

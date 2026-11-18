@@ -1,19 +1,19 @@
-# RustOS
+# GTos
 
 A small, bootable x86_64 operating system written from scratch in Rust — no
 Linux, no `std`, no libc.
 
-> **Pre-alpha:** RustOS is an experimental hobby OS. Expect incomplete features,
+> **Pre-alpha:** GTos is an experimental hobby OS. Expect incomplete features,
 > bugs and breaking changes; it is not ready for daily use. The browser's HTTPS
 > support is encrypted but does not verify certificates.
 
-![RustOS running in QEMU](docs/screenshot.png)
+![GTos running in QEMU](docs/screenshot.png)
 
-## The RustOS Manual
+## The GTos Manual
 
 The manual lives in [`manual/`](manual/), which is its authoritative source.
 
-- [Welcome to RustOS!](manual/01-welcome.md)
+- [Welcome to GTos!](manual/01-welcome.md)
 
 **The Basics**
 
@@ -42,4 +42,4 @@ The manual lives in [`manual/`](manual/), which is its authoritative source.
 
 ## License
 
-RustOS is released under the [MIT License](LICENSE).
+GTos is released under the [MIT License](LICENSE).

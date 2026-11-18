@@ -1,5 +1,5 @@
 //! The bootable binary: the bootloader's entry point into the
-//! `rustos-allocator-designs` library.
+//! `gtos-allocator-designs` library.
 //!
 //! All of the logic lives in the library (`src/lib.rs`); this file only owns the
 //! bootloader configuration, the `_start` entry point that [`entry_point`]
@@ -28,15 +28,15 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_allocator_designs::kernel_main(boot_info)
+    gtos_allocator_designs::kernel_main(boot_info)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    rustos_allocator_designs::panic_handler(info)
+    gtos_allocator_designs::panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_allocator_designs::alloc_error_handler(layout)
+    gtos_allocator_designs::alloc_error_handler(layout)
 }

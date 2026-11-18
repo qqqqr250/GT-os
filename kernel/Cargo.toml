@@ -3,7 +3,7 @@ name = "kernel"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "RustOS kernel: freestanding x86_64 kernel"
+description = "GTos kernel: freestanding x86_64 kernel"
 license = "MIT"
 publish = false
 

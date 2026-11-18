@@ -64,8 +64,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\hardware-interrupts\target\$target\$buildProfile\rustos-hardware-interrupts"
-    $image = "target\hardware-interrupts\rustos-hardware-interrupts-bios.img"
+    $elf = "examples\hardware-interrupts\target\$target\$buildProfile\gtos-hardware-interrupts"
+    $image = "target\hardware-interrupts\gtos-hardware-interrupts-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

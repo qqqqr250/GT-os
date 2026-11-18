@@ -70,8 +70,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\allocator-designs\target\$target\$buildProfile\rustos-allocator-designs"
-    $image = "target\allocator-designs\rustos-allocator-designs-bios.img"
+    $elf = "examples\allocator-designs\target\$target\$buildProfile\gtos-allocator-designs"
+    $image = "target\allocator-designs\gtos-allocator-designs-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

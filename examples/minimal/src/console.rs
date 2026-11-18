@@ -53,7 +53,7 @@ pub fn banner(offset: Option<u64>) {
     ));
     set_fg(Color::White);
     print_args(format_args!(
-        "|  RustOS minimal: post-02, done properly                  |\n"
+        "|  GTos minimal: post-02, done properly                  |\n"
     ));
     set_fg(Color::LightGray);
     print_args(format_args!(

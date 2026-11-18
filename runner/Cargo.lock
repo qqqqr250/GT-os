@@ -180,6 +180,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gtos-test-runner"
+version = "0.1.0"
+dependencies = [
+ "bootloader",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -292,13 +299,6 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
-]
-
-[[package]]
-name = "rustos-test-runner"
-version = "0.1.0"
-dependencies = [
- "bootloader",
 ]
 
 [[package]]

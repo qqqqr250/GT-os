@@ -1,4 +1,4 @@
-//! In-QEMU tests for the `rustos-heap-allocation` kernel.
+//! In-QEMU tests for the `gtos-heap-allocation` kernel.
 //!
 //! These drive the crate's *public* API from a separate test binary: `cargo test`
 //! links this file for `x86_64-unknown-none`, the runner in `runner/` wraps it in
@@ -21,7 +21,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![test_runner(rustos_heap_allocation::test_runner)]
+#![test_runner(gtos_heap_allocation::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 // The tests allocate through the global allocator, so they need the `alloc`
@@ -34,7 +34,7 @@ use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_heap_allocation::{allocator, halt_forever, memory, serial};
+use gtos_heap_allocation::{allocator, halt_forever, memory, serial};
 
 static TEST_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -49,7 +49,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // The GDT/TSS must be loaded before the IDT names the double-fault IST slot,
     // and `interrupts::init` remaps the PIC, starts the PIT and enables
     // interrupts. `init` does both in the right order.
-    rustos_heap_allocation::init();
+    gtos_heap_allocation::init();
 
     let offset = boot_info
         .physical_memory_offset
@@ -66,12 +66,12 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_heap_allocation::test_panic_handler(info)
+    gtos_heap_allocation::test_panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_heap_allocation::alloc_error_handler(layout)
+    gtos_heap_allocation::alloc_error_handler(layout)
 }
 
 #[test_case]

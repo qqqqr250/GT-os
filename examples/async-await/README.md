@@ -1,10 +1,10 @@
-# RustOS async-await — `blog_os` post-12, done properly
+# GTos async-await — `blog_os` post-12, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-12](https://github.com/phil-opp/blog_os/tree/post-12) — the
 *Async/Await* post, which adds a cooperative multitasking runtime to the kernel —
 and rebuilds it as something you would actually ship. It is deliberately *not* part
-of the main RustOS workspace, so it can be built and tested on its own.
+of the main GTos workspace, so it can be built and tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),
 [`examples/vga-text`](../vga-text/README.md) (post-03),

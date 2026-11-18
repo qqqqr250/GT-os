@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs everything RustOS needs on Windows: nightly Rust, the bare-metal
+    Installs everything GTos needs on Windows: nightly Rust, the bare-metal
     targets, MinGW-w64 (host linker for build scripts) and QEMU.
 
 .DESCRIPTION

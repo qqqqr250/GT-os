@@ -1,6 +1,6 @@
 # Audio
 
-RustOS plays sound through an emulated **AC'97** codec (PCI `8086:2415`). The
+GTos plays sound through an emulated **AC'97** codec (PCI `8086:2415`). The
 driver in `kernel/src/audio.rs` finds the device on the PCI bus, programs the
 native-audio mixer and bus-mastering registers, and feeds the codec from a
 32-entry buffer descriptor list: it allocates a PCM buffer, points the

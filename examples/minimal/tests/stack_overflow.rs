@@ -3,7 +3,7 @@
 //! This is post-06's `tests/stack_overflow.rs`: the test recurses until the
 //! guard page below the kernel stack is hit and asserts that the *double fault*
 //! handler runs on the dedicated IST stack (see
-//! [`rustos_minimal::testing`]), instead of the machine triple faulting. It runs
+//! [`gtos_minimal::testing`]), instead of the machine triple faulting. It runs
 //! without the normal harness, because a double fault cannot return: the test
 //! passes or fails by exiting QEMU.
 //!
@@ -28,8 +28,8 @@
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_minimal::println;
-use rustos_minimal::testing::{
+use gtos_minimal::println;
+use gtos_minimal::testing::{
     DOUBLE_FAULT_IST_INDEX, QemuExitCode, exit_qemu, init_gdt, init_serial, overflow_stack,
 };
 use spin::Mutex;

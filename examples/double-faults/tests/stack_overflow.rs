@@ -1,4 +1,4 @@
-//! In-QEMU stack-overflow test for `rustos-double-faults`.
+//! In-QEMU stack-overflow test for `gtos-double-faults`.
 //!
 //! This is post-06's `tests/stack_overflow.rs`: the test recurses until the
 //! guard page below the kernel stack is hit and asserts that the *double fault*
@@ -30,8 +30,8 @@ use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
-use rustos_double_faults::gdt::{self, DOUBLE_FAULT_IST_INDEX};
-use rustos_double_faults::{QemuExitCode, exit_qemu, overflow_stack, serial, serial_println};
+use gtos_double_faults::gdt::{self, DOUBLE_FAULT_IST_INDEX};
+use gtos_double_faults::{QemuExitCode, exit_qemu, overflow_stack, serial, serial_println};
 
 /// The tests need the physical-memory window, exactly like the real kernel, so
 /// that the boot path is the same.
@@ -62,7 +62,7 @@ fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_double_faults::test_panic_handler(info)
+    gtos_double_faults::test_panic_handler(info)
 }
 
 /// The test's own IDT: a double fault handler that passes the test instead of

@@ -8,19 +8,19 @@ read/write **FAT16** implementation (`kernel/src/fat.rs`) with `mount`, `list`,
 
 Two drives are attached: the boot image on the primary master (drive 0) and a
 16 MiB data disk on the primary slave (drive 1). `build.rs` creates the data disk
-at the project root as `rustos-data.img` **only if it is missing**, so anything
-you write from inside RustOS survives a rebuild. It is seeded once with
+at the project root as `gtos-data.img` **only if it is missing**, so anything
+you write from inside GTos survives a rebuild. It is seeded once with
 `README.TXT`, a tone (`BEEP.WAV`) and a ring-3 program (`HELLO.BIN`). Delete the
 file and rebuild to regenerate a pristine image.
 
 ```
-rustos> disks
+gtos> disks
 drive 0 (master): 5 MiB, 11202 sectors
   model: QEMU HARDDISK
 drive 1 (slave): 16 MiB, 32768 sectors
   model: QEMU HARDDISK
-rustos> write NOTES.TXT hello from RustOS
+gtos> write NOTES.TXT hello from GTos
 wrote 19 bytes to NOTES.TXT
-rustos> cat NOTES.TXT
-hello from RustOS
+gtos> cat NOTES.TXT
+hello from GTos
 ```

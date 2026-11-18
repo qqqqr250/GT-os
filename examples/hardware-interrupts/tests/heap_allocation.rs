@@ -1,4 +1,4 @@
-//! In-QEMU tests for the post-10 heap hook in `rustos-hardware-interrupts`.
+//! In-QEMU tests for the post-10 heap hook in `gtos-hardware-interrupts`.
 //!
 //! The crate is post-07, so its focus is the PIC/PIT/keyboard, but it also carries
 //! post-08's [`memory`] module and post-10's [`allocator`] module forward. This
@@ -23,7 +23,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![test_runner(rustos_hardware_interrupts::test_runner)]
+#![test_runner(gtos_hardware_interrupts::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 // The tests allocate through the global allocator, so they need the `alloc`
@@ -36,7 +36,7 @@ use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_hardware_interrupts::{allocator, halt_forever, memory, serial};
+use gtos_hardware_interrupts::{allocator, halt_forever, memory, serial};
 
 static TEST_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -50,7 +50,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::init();
     // Install the GDT/TSS and the IDT/PIC/PIT before the harness runs: the timer
     // test needs the tick to be live and the GDT test needs the TSS.
-    rustos_hardware_interrupts::init();
+    gtos_hardware_interrupts::init();
 
     let offset = boot_info
         .physical_memory_offset
@@ -67,12 +67,12 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_hardware_interrupts::test_panic_handler(info)
+    gtos_hardware_interrupts::test_panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_hardware_interrupts::alloc_error_handler(layout)
+    gtos_hardware_interrupts::alloc_error_handler(layout)
 }
 
 #[test_case]

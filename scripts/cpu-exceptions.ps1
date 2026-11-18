@@ -61,8 +61,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\cpu-exceptions\target\$target\$buildProfile\rustos-cpu-exceptions"
-    $image = "target\cpu-exceptions\rustos-cpu-exceptions-bios.img"
+    $elf = "examples\cpu-exceptions\target\$target\$buildProfile\gtos-cpu-exceptions"
+    $image = "target\cpu-exceptions\gtos-cpu-exceptions-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

@@ -16,11 +16,11 @@ all = "warn"
 pedantic = "warn"
 
 [package]
-name = "rustos"
+name = "gtos"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "RustOS: a small x86_64 operating system written from scratch in Rust"
+description = "GTos: a small x86_64 operating system written from scratch in Rust"
 license = "MIT"
 publish = false
 

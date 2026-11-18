@@ -39,7 +39,7 @@ const BOOT_DIR_LBA: u32 = 24;
 /// The UEFI FAT image doubles as the `/EFI/BOOT/BOOTX64.EFI` file.
 const BOOT_FILE_LBA: u32 = 25;
 
-const VOLUME_ID: &str = "RUSTOS";
+const VOLUME_ID: &str = "GTOS";
 
 /// El Torito media types.
 const MEDIA_NO_EMULATION: u8 = 0x00;
@@ -97,7 +97,7 @@ pub fn build(out_dir: &Path, bios_image: &Path, uefi_fat: &Path) -> io::Result<P
         ),
     );
 
-    let iso_path = out_dir.join("rustos.iso");
+    let iso_path = out_dir.join("gtos.iso");
     fs::write(&iso_path, &image)?;
     Ok(iso_path)
 }
@@ -301,7 +301,7 @@ fn boot_catalog(bios_lba: u32, bios_length: usize, uefi_lba: u32, uefi_length: u
     // Validation entry.
     catalog[0] = 0x01; // header id
     catalog[1] = 0x00; // platform id: 80x86
-    write_padded(&mut catalog[4..28], b"RustOS", 0);
+    write_padded(&mut catalog[4..28], b"GTos", 0);
     catalog[30] = 0x55;
     catalog[31] = 0xAA;
     let checksum = validation_checksum(&catalog[..32]);
@@ -323,7 +323,7 @@ fn boot_catalog(bios_lba: u32, bios_length: usize, uefi_lba: u32, uefi_length: u
     catalog[64] = 0x91;
     catalog[65] = 0xEF; // platform id: EFI
     catalog[66..68].copy_from_slice(&1u16.to_le_bytes());
-    write_padded(&mut catalog[68..96], b"RustOS UEFI", 0);
+    write_padded(&mut catalog[68..96], b"GTos UEFI", 0);
 
     // UEFI entry: the FAT image, loaded without emulation. In no-emulation mode
     // the El Torito sector count is in 512-byte (virtual) sectors.

@@ -1,11 +1,11 @@
-# RustOS paging — `blog_os` post-08, done properly
+# GTos paging — `blog_os` post-08, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-08](https://github.com/phil-opp/blog_os/tree/post-08) — the
 *Introduction to Paging* post, whose only code change is to read `CR3` and print
 the active level-4 table's address — and rebuilds it, together with the paging
 *implementation* from the following post, as something you would actually ship. It
-is deliberately *not* part of the main RustOS workspace, so it can be built and
+is deliberately *not* part of the main GTos workspace, so it can be built and
 tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

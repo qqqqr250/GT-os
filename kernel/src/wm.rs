@@ -39,6 +39,7 @@ const COL_CLOSE_RED: Color = Color(0xE8_11_23);
 const COL_BORDER: Color = Color(0x00_3C_74);
 const COL_TEXT: Color = Color(0x00_00_00);
 const COL_TEXT_WHITE: Color = Color(0xFF_FF_FF);
+const MID_GRAY: Color = Color(0xC0_C0_C0);
 const COL_MENU_BG: Color = Color(0xF0_F0_F0);
 const COL_MENU_TEXT: Color = Color(0x00_00_00);
 const COL_MENU_HILITE: Color = Color(0x31_6A_C6);
@@ -68,7 +69,7 @@ const MENU_ITEMS: [&str; 7] = [
     "Settings",
     "Command Prompt",
     "Run...",
-    "About RustOS",
+    "About GTos",
     "Log Off",
     "Shut Down",
 ];
@@ -148,7 +149,7 @@ impl WindowContent {
             WindowContent::RecycleBin | WindowContent::MyComputer => (440, 300),
             WindowContent::About => (400, 280),
             WindowContent::MyDocuments => (460, 320),
-            WindowContent::Browser => (520, 360),
+            WindowContent::Browser => (900, 600),
             WindowContent::Settings => (420, 320),
             WindowContent::CommandPrompt => (480, 300),
             WindowContent::Run => (380, 190),
@@ -187,11 +188,11 @@ pub struct Desktop {
     /// Current input line.
     cp_input: [u8; 128],
     cp_input_len: usize,
-    /// Browser window: the editable address, the last rendered page (one
-    /// `String` per display line), the scroll offset into it and a status line.
+    /// Browser window: the editable address, the last laid-out page, the
+    /// scroll offset into it and a status line.
     browser_url: [u8; 160],
     browser_url_len: usize,
-    browser_lines: Vec<alloc::string::String>,
+    browser_page: browser::Page,
     browser_scroll: usize,
     browser_status: alloc::string::String,
     /// Whether typing edits the address bar (as opposed to scrolling the page).
@@ -248,7 +249,7 @@ impl Desktop {
             cp_input_len: 0,
             browser_url: [0; 160],
             browser_url_len: 0,
-            browser_lines: Vec::new(),
+            browser_page: browser::Page::default(),
             browser_scroll: 0,
             browser_status: alloc::string::String::new(),
             browser_editing: true,
@@ -416,7 +417,7 @@ impl Desktop {
         })?;
         if content == WindowContent::CommandPrompt {
             self.cp_output.clear();
-            self.cp_output.push_str("RustOS Command Prompt\n");
+            self.cp_output.push_str("GTos Command Prompt\n");
             self.cp_output.push_str("Type 'help' for commands.\n\n");
             self.cp_output.push_str("C:\\> ");
         }
@@ -458,6 +459,13 @@ impl Desktop {
             .find(|w| w.content == WindowContent::Browser)
     }
 
+    /// Replaces the page with a short plain-text message.
+    fn browser_message(&mut self, lines: &[&str]) {
+        let columns = self.browser_columns();
+        self.browser_page = browser::Page::from_text(lines, columns);
+        self.browser_scroll = 0;
+    }
+
     /// Fetches the address in the bar and renders it into the window. The fetch
     /// is synchronous, so a "Loading..." page is drawn first.
     fn browser_navigate(&mut self) {
@@ -469,53 +477,49 @@ impl Desktop {
 
         if !crate::net::is_up() {
             self.browser_status = alloc::string::String::from("No network adapter");
-            self.browser_lines = alloc::vec![
-                alloc::string::String::from("The RTL8139 adapter is not up."),
-                alloc::string::String::from("Boot QEMU with -nic user,model=rtl8139."),
-            ];
-            self.browser_scroll = 0;
+            self.browser_message(&[
+                "The RTL8139 adapter is not up.",
+                "Boot QEMU with -nic user,model=rtl8139.",
+            ]);
             return;
         }
 
+        let columns = self.browser_columns();
+        let loading = alloc::format!("Loading {url} ...");
         self.browser_status = alloc::string::String::from("Loading...");
-        self.browser_lines = alloc::vec![alloc::format!("Loading {url} ...")];
+        self.browser_page = browser::Page::from_text(&[&loading], columns);
         self.browser_scroll = 0;
         self.render();
 
-        let columns = self.browser_columns();
         match crate::net::fetch_url(&url) {
             Ok(mut response) => {
                 self.browser_status = core::mem::take(&mut response.status_line);
                 let body = response.body_text();
-                let mut lines = alloc::vec::Vec::new();
+                let mut page = browser::render(&body, columns);
                 if let Some(title) = browser::title(&body) {
-                    lines.push(title);
-                    lines.push(alloc::string::String::new());
+                    page.lines.insert(0, browser::Line::blank());
+                    page.lines.insert(0, browser::Line::heading(&title));
                 }
-                lines.extend(browser::render(&body, columns));
-                if lines.is_empty() {
-                    lines.push(alloc::string::String::from(
-                        "(the page had no readable text)",
-                    ));
+                if page.lines.is_empty() {
+                    page = browser::Page::from_text(&["(the page had no readable text)"], columns);
                 }
-                self.browser_lines = lines;
+                self.browser_page = page;
             }
             Err(error) => {
                 self.browser_status = alloc::string::String::from("Request failed");
-                self.browser_lines = alloc::vec![
-                    alloc::format!("Could not fetch {url}"),
-                    error,
-                    alloc::string::String::from("Check the address and the network."),
+                let mut messages = alloc::vec![
+                    "Could not fetch the page.",
+                    error.as_str(),
+                    "Check the address and the network.",
                 ];
                 if url
                     .trim_start()
                     .to_ascii_lowercase()
                     .starts_with("https://")
                 {
-                    self.browser_lines.push(alloc::string::String::from(
-                        "HTTPS is experimental: certificates are not verified.",
-                    ));
+                    messages.push("HTTPS is experimental: certificates are not verified.");
                 }
+                self.browser_page = browser::Page::from_text(&messages, columns);
             }
         }
         self.browser_scroll = 0;
@@ -530,7 +534,7 @@ impl Desktop {
                 true
             }
             input::KEY_DOWN => {
-                let last = self.browser_lines.len().saturating_sub(1);
+                let last = self.browser_page.lines.len().saturating_sub(1);
                 self.browser_scroll = (self.browser_scroll + 1).min(last);
                 true
             }
@@ -539,7 +543,7 @@ impl Desktop {
                 true
             }
             input::KEY_PAGE_DOWN => {
-                let last = self.browser_lines.len().saturating_sub(1);
+                let last = self.browser_page.lines.len().saturating_sub(1);
                 self.browser_scroll = (self.browser_scroll + self.browser_rows()).min(last);
                 true
             }
@@ -548,7 +552,7 @@ impl Desktop {
                 true
             }
             input::KEY_END => {
-                self.browser_scroll = self.browser_lines.len().saturating_sub(1);
+                self.browser_scroll = self.browser_page.lines.len().saturating_sub(1);
                 true
             }
             b'\n' | b'\r' => {
@@ -831,6 +835,58 @@ impl Desktop {
                 }
             }
             cx += 8 * scale;
+        }
+    }
+
+    /// Draws one pixel only when it lies inside `clip`, so page content never
+    /// spills over the browser window's chrome or another window.
+    fn put_clip(&self, x: usize, y: usize, color: Color, clip: Rect) {
+        if x >= clip.x
+            && x < clip.x.saturating_add(clip.w)
+            && y >= clip.y
+            && y < clip.y.saturating_add(clip.h)
+        {
+            self.put_pixel(x, y, color);
+        }
+    }
+
+    /// Draws one styled text run with simple bold/italic/underline effects.
+    fn draw_span(
+        &self,
+        x: usize,
+        y: usize,
+        text: &str,
+        style: crate::browser::SpanStyle,
+        clip: Rect,
+    ) {
+        let scale = style.scale.max(1);
+        for (index, ch) in text.bytes().enumerate() {
+            let glyph = &crate::font::FONT[(ch & 0x7f) as usize];
+            let start = x + index * 8 * scale;
+            for (row, &bits) in glyph.iter().enumerate() {
+                let skew = usize::from(style.italic && row >= 3);
+                for col in 0..8usize {
+                    if bits & (1 << col) == 0 {
+                        continue;
+                    }
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            let px = start + col * scale + dx;
+                            let py = y + row * scale + dy;
+                            self.put_clip(px.saturating_sub(skew), py, style.color, clip);
+                            if style.bold {
+                                self.put_clip(px + 1, py, style.color, clip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if style.underline {
+            let width = text.len().saturating_mul(8 * scale);
+            for px in x..x.saturating_add(width) {
+                self.put_clip(px, y + 8 * scale, style.color, clip);
+            }
         }
     }
 
@@ -1145,8 +1201,8 @@ impl Desktop {
         let cy = r.y + TITLE_BAR_HEIGHT + 8;
         match w.content {
             WindowContent::Terminal => {
-                self.draw_text(cx, cy, "RustOS Terminal", COL_TEXT, 1);
-                self.draw_text(cx, cy + 16, "rustos> help", COL_TEXT, 1);
+                self.draw_text(cx, cy, "GTos Terminal", COL_TEXT, 1);
+                self.draw_text(cx, cy + 16, "gtos> help", COL_TEXT, 1);
                 self.draw_text(cx, cy + 32, "Type 'help' for commands.", COL_TEXT, 1);
                 self.draw_text(cx, cy + 48, "Kernel running in ring 0.", COL_TEXT, 1);
             }
@@ -1185,7 +1241,7 @@ impl Desktop {
                 self.draw_text(
                     cx,
                     cy + 112,
-                    "RustOS has no writable filesystem,",
+                    "GTos has no writable filesystem,",
                     COL_TEXT,
                     1,
                 );
@@ -1198,7 +1254,7 @@ impl Desktop {
                 );
             }
             WindowContent::About => {
-                self.draw_text(cx, cy, "RustOS 0.1.0", COL_TEXT, 1);
+                self.draw_text(cx, cy, "GTos 0.1.0", COL_TEXT, 1);
                 self.draw_text(cx, cy + 16, "A bare-metal x86_64 OS", COL_TEXT, 1);
                 self.draw_text(cx, cy + 32, "written in Rust.", COL_TEXT, 1);
                 self.draw_text(cx, cy + 48, "No Linux. No std. No libc.", COL_TEXT, 1);
@@ -1207,7 +1263,7 @@ impl Desktop {
                 self.draw_text(cx, cy, "My Computer", COL_TEXT, 1);
                 self.draw_text(cx, cy + 24, "Local Disk (C:)   32 MiB", COL_TEXT, 1);
                 self.draw_text(cx, cy + 40, "Floppy Disk (A:)  none", COL_TEXT, 1);
-                self.draw_text(cx, cy + 64, "System: RustOS 0.1.0", COL_TEXT, 1);
+                self.draw_text(cx, cy + 64, "System: GTos 0.1.0", COL_TEXT, 1);
                 self.draw_text(cx, cy + 80, "Heap: 32 MiB, ring 0", COL_TEXT, 1);
             }
             WindowContent::MyDocuments => {
@@ -1228,12 +1284,12 @@ impl Desktop {
                     COL_TEXT,
                     1,
                 );
-                self.draw_text(cx, cy + 68, "rustos.log        4 KB    Log", COL_TEXT, 1);
+                self.draw_text(cx, cy + 68, "gtos.log        4 KB    Log", COL_TEXT, 1);
                 self.draw_text(cx, cy + 80, "config.toml       1 KB    TOML", COL_TEXT, 1);
                 self.draw_text(cx, cy + 100, "4 files, 8 KB total", COL_TEXT, 1);
             }
             WindowContent::Browser => {
-                // Address bar.
+                // Toolbar: address field and Go button.
                 let bar_w = r.w.saturating_sub(2 * BORDER_WIDTH + 8);
                 let bar = Rect {
                     x: cx - 4,
@@ -1244,18 +1300,15 @@ impl Desktop {
                 self.fill_rect_xy(bar.x, bar.y, bar.w, bar.h, Color(0xFF_FF_FF));
                 self.draw_rect_border(bar, COL_BORDER, 1);
 
-                // Address text, clipped to the bar.
                 let url = self.browser_url_str();
-                let max_chars = bar.w.saturating_sub(12) / 8;
+                let max_chars = bar.w.saturating_sub(44) / 8;
                 let shown: alloc::string::String = url.chars().take(max_chars).collect();
                 self.draw_text(bar.x + 4, bar.y + 6, &shown, COL_TEXT, 1);
                 if self.browser_editing {
-                    // Caret after the address.
                     let caret_x = bar.x + 4 + shown.len() * 8;
                     self.vline(caret_x, bar.y + 4, 12, COL_TEXT);
                 }
 
-                // Go button.
                 let go = Rect {
                     x: bar.x + bar.w - 34,
                     y: bar.y + 2,
@@ -1266,24 +1319,174 @@ impl Desktop {
                 self.draw_rect_border(go, COL_BORDER, 1);
                 self.draw_text(go.x + 8, go.y + 4, "Go", COL_TEXT, 1);
 
-                // Status line.
-                let status_y = bar.y + bar.h + 4;
-                self.draw_text(cx, status_y, &self.browser_status, Color(0x00_58_EE), 1);
+                // Status bar at the foot of the window, like a real browser.
+                let status_bar = Rect {
+                    x: r.x + BORDER_WIDTH,
+                    y: r.y + r.h - BORDER_WIDTH - 20,
+                    w: r.w.saturating_sub(2 * BORDER_WIDTH),
+                    h: 20,
+                };
+                self.fill_rect(status_bar, Color(0xEC_E9_D8));
+                self.hline(status_bar.x, status_bar.y, status_bar.w, COL_BORDER);
+                let status: alloc::string::String = self
+                    .browser_status
+                    .chars()
+                    .take(status_bar.w.saturating_sub(8) / 8)
+                    .collect();
+                self.draw_text(
+                    status_bar.x + 4,
+                    status_bar.y + 6,
+                    &status,
+                    Color(0x00_58_EE),
+                    1,
+                );
 
-                // Page text.
-                let text_y = status_y + 14;
-                let bottom = r.y + r.h - BORDER_WIDTH - 4;
-                if self.browser_lines.is_empty() {
-                    self.draw_text(cx, text_y, "Type an address and press Enter.", COL_TEXT, 1);
-                } else {
-                    let mut y = text_y;
-                    for line in self.browser_lines.iter().skip(self.browser_scroll) {
-                        if y + 8 > bottom {
-                            break;
-                        }
-                        self.draw_text(cx, y, line, COL_TEXT, 1);
-                        y += BROWSER_LINE_H;
+                // Page viewport.
+                let page_y = bar.y + bar.h + 4;
+                let page_rect = Rect {
+                    x: r.x + BORDER_WIDTH,
+                    y: page_y,
+                    w: bar_w,
+                    h: status_bar.y.saturating_sub(page_y),
+                };
+                let page = &self.browser_page;
+                self.fill_rect(page_rect, page.background);
+                let clip = Rect {
+                    x: page_rect.x,
+                    y: page_rect.y,
+                    w: page_rect.w.saturating_sub(10),
+                    h: page_rect.h,
+                };
+                let text_left = page_rect.x + 6;
+                let text_w = clip.w.saturating_sub(6);
+
+                // Scrollbar thumb, when the page is taller than the viewport.
+                if page.height() > page_rect.h {
+                    let track_x = page_rect.x + page_rect.w - 8;
+                    self.fill_rect_xy(track_x, page_rect.y, 8, page_rect.h, Color(0xE0_E0_E0));
+                    let total = page.height() as u64;
+                    let view = page_rect.h as u64;
+                    let thumb_h =
+                        ((view * view / total.max(1)) as usize).clamp(16, page_rect.h.max(16));
+                    let scroll_px: u64 = page
+                        .lines
+                        .iter()
+                        .take(self.browser_scroll)
+                        .map(|line| line.height() as u64)
+                        .sum();
+                    let thumb_y = (scroll_px * (page_rect.h.saturating_sub(thumb_h) as u64)
+                        / total.saturating_sub(view).max(1))
+                        as usize;
+                    self.fill_rect_xy(
+                        track_x,
+                        page_rect.y + thumb_y,
+                        8,
+                        thumb_h,
+                        Color(0x80_80_80),
+                    );
+                }
+
+                if page.lines.is_empty() {
+                    self.draw_text(
+                        text_left,
+                        page_rect.y + 6,
+                        "Type an address and press Enter.",
+                        COL_TEXT,
+                        1,
+                    );
+                }
+
+                let mut y = page_rect.y + 2;
+                for line in page.lines.iter().skip(self.browser_scroll) {
+                    let height = line.height();
+                    if y + height > page_rect.y + page_rect.h {
+                        break;
                     }
+                    if let Some(decor) = line.decor {
+                        let dx = page_rect.x + 2 + decor.x;
+                        let page_right = page_rect.x + page_rect.w;
+                        if dx < page_right {
+                            let dw = decor.w.min(page_right - dx);
+                            self.fill_rect_xy(dx, y, dw, height, decor.color);
+                        }
+                    }
+                    if let Some(background) = line.background {
+                        self.fill_rect_xy(page_rect.x + 2, y, text_w, height, background);
+                    }
+
+                    match line.kind {
+                        browser::LineKind::Rule => {
+                            for px in text_left..text_left + text_w {
+                                self.put_clip(px, y + 4, Color(0xC0_C0_C0), clip);
+                            }
+                        }
+                        browser::LineKind::Image => {
+                            let box_rect = Rect {
+                                x: text_left + line.indent,
+                                y: y + 2,
+                                w: 96,
+                                h: 44,
+                            };
+                            self.fill_rect(box_rect, Color(0xF5_F5_F5));
+                            self.draw_rect_border(box_rect, MID_GRAY, 1);
+                            let alt: alloc::string::String = line
+                                .spans
+                                .first()
+                                .map_or_else(alloc::string::String::new, |span| {
+                                    span.text.chars().take(11).collect()
+                                });
+                            self.draw_text(box_rect.x + 4, y + 20, &alt, Color(0x60_60_60), 1);
+                        }
+                        browser::LineKind::Button => {
+                            let label = line.spans.first().map_or("", |span| span.text.as_str());
+                            let width = label.chars().count() * 8 + 16;
+                            let button = Rect {
+                                x: text_left + line.indent,
+                                y: y + 2,
+                                w: width,
+                                h: 22,
+                            };
+                            self.fill_rect(button, Color(0xEC_E9_D8));
+                            self.draw_rect_border(button, COL_BORDER, 1);
+                            self.draw_text(button.x + 8, y + 8, label, COL_TEXT, 1);
+                        }
+                        _ => {
+                            let mut x = text_left + line.indent;
+                            if line.kind == browser::LineKind::Quote {
+                                self.fill_rect_xy(
+                                    x.saturating_sub(6),
+                                    y + 1,
+                                    2,
+                                    height.saturating_sub(2),
+                                    Color(0xC8_D8_F0),
+                                );
+                                x += 6;
+                            }
+                            if let browser::LineKind::ListItem(depth) = line.kind {
+                                // The ordered/unordered marker is part of the
+                                // styled text; nested lists get a little more
+                                // room for it.
+                                x += 4 * depth.min(3);
+                            }
+                            let line_width: usize = line
+                                .spans
+                                .iter()
+                                .map(|span| span.text.chars().count() * 8 * span.style.scale.max(1))
+                                .sum();
+                            if line.align == browser::Align::Center {
+                                x = text_left + text_w.saturating_sub(line_width) / 2;
+                            } else if line.align == browser::Align::Right {
+                                x = text_left + text_w.saturating_sub(line_width);
+                            }
+                            for span in &line.spans {
+                                let advance =
+                                    span.text.chars().count() * 8 * span.style.scale.max(1);
+                                self.draw_span(x, y, &span.text, span.style, clip);
+                                x += advance;
+                            }
+                        }
+                    }
+                    y += height;
                 }
             }
             WindowContent::Settings => {
@@ -1442,7 +1645,7 @@ impl Desktop {
                 self.draw_text(
                     cx,
                     cy + 14,
-                    "or document, and RustOS will open it.",
+                    "or document, and GTos will open it.",
                     COL_TEXT,
                     1,
                 );
@@ -1477,7 +1680,7 @@ impl Desktop {
                 }
             }
             WindowContent::LogOff => {
-                self.draw_text(cx, cy, "Log Off RustOS", COL_TEXT, 1);
+                self.draw_text(cx, cy, "Log Off GTos", COL_TEXT, 1);
                 self.draw_text(cx, cy + 24, "No user session is running", COL_TEXT, 1);
                 self.draw_text(cx, cy + 40, "yet. Click the X to close.", COL_TEXT, 1);
             }
@@ -1608,7 +1811,7 @@ impl Desktop {
             COL_TITLE_ACTIVE,
             COL_TITLE_ACTIVE2,
         );
-        self.draw_text(m.x + 10, m.y + 12, "RustOS", COL_TEXT_WHITE, 1);
+        self.draw_text(m.x + 10, m.y + 12, "GTos", COL_TEXT_WHITE, 1);
 
         // Menu items, with the hovered one highlighted.
         let mut iy = m.y + MENU_HEADER;
@@ -1952,7 +2155,7 @@ impl Desktop {
                 self.spawn_window("Run", WindowContent::Run);
             }
             4 => {
-                self.spawn_window("About RustOS", WindowContent::About);
+                self.spawn_window("About GTos", WindowContent::About);
             }
             5 => {
                 self.spawn_window("Log Off", WindowContent::LogOff);
@@ -2054,6 +2257,11 @@ pub fn run() {
                 .map(|w| w.content);
             let mut changed = false;
             while let Some(byte) = input::pop() {
+                if byte == input::KEY_BROWSER {
+                    d.spawn_window("Browser", WindowContent::Browser);
+                    changed = true;
+                    continue;
+                }
                 if byte == input::KEY_WINDOWS {
                     // The Windows key opens (or closes) the Start menu even
                     // when a window has keyboard focus, just like Windows XP.

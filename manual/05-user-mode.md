@@ -21,11 +21,11 @@ back to the shell instead of halting the machine.
 against the user base, so it is position-dependent by design:
 
 ```
-rustos> run
+gtos> run
 running demo program (71 bytes) in ring 3 ...
 Hello from ring 3! (via int 0x80)
 demo program exited with status 0
-rustos> run HELLO.BIN
+gtos> run HELLO.BIN
 running HELLO.BIN (77 bytes) in ring 3 ...
 Hello from HELLO.BIN running in ring 3!
 HELLO.BIN exited with status 0

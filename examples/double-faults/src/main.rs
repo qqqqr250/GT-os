@@ -1,5 +1,5 @@
 //! The bootable binary: the bootloader's entry point into the
-//! `rustos-double-faults` library.
+//! `gtos-double-faults` library.
 //!
 //! All of the logic lives in the library (`src/lib.rs`); this file only owns the
 //! bootloader configuration, the `_start` entry point that [`entry_point`]
@@ -28,15 +28,15 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_double_faults::kernel_main(boot_info)
+    gtos_double_faults::kernel_main(boot_info)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    rustos_double_faults::panic_handler(info)
+    gtos_double_faults::panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_double_faults::alloc_error_handler(layout)
+    gtos_double_faults::alloc_error_handler(layout)
 }

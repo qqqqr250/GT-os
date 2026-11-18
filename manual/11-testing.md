@@ -1,6 +1,6 @@
 # Testing
 
-RustOS has two layers of tests: an **in-QEMU `cargo test`** suite that runs
+GTos has two layers of tests: an **in-QEMU `cargo test`** suite that runs
 inside the kernel, and an **end-to-end smoke test** that boots a real image and
 drives the shell.
 

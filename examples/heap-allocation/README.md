@@ -1,10 +1,10 @@
-# RustOS heap-allocation — `blog_os` post-10, done properly
+# GTos heap-allocation — `blog_os` post-10, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-10](https://github.com/phil-opp/blog_os/tree/post-10) — the *Heap
 Allocation* post, which adds a virtual heap region, a `#[global_allocator]` and
 the `alloc` crate's `Box`, `Vec` and `Rc` — and rebuilds it as something you would
-actually ship. It is deliberately *not* part of the main RustOS workspace, so it
+actually ship. It is deliberately *not* part of the main GTos workspace, so it
 can be built and tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02),

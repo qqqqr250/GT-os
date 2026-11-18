@@ -41,8 +41,8 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!(
         "usage:\n  \
-         rustos-test-runner <kernel-test-binary>     build + boot a test ELF in QEMU\n  \
-         rustos-test-runner --image <elf> [<out>]    build a bootable disk image only"
+         gtos-test-runner <kernel-test-binary>     build + boot a test ELF in QEMU\n  \
+         gtos-test-runner --image <elf> [<out>]    build a bootable disk image only"
     );
 }
 
@@ -102,7 +102,7 @@ fn run_test_mode(kernel: PathBuf) -> ExitCode {
     let mut command = Command::new(&qemu);
     command
         .arg("-name")
-        .arg("RustOS tests")
+        .arg("GTos tests")
         .arg("-m")
         .arg("256M")
         .arg("-no-reboot")
@@ -137,7 +137,7 @@ fn build_image(kernel: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let stem = kernel
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .unwrap_or("rustos-test");
+        .unwrap_or("gtos-test");
     let image = std::env::temp_dir().join(format!("{stem}-disk.img"));
     build_image_to(kernel, &image)
 }

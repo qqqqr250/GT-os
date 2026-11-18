@@ -61,8 +61,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\testing\target\$target\$buildProfile\rustos-testing"
-    $image = "target\testing\rustos-testing-bios.img"
+    $elf = "examples\testing\target\$target\$buildProfile\gtos-testing"
+    $image = "target\testing\gtos-testing-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

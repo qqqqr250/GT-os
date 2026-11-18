@@ -67,8 +67,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\heap-allocation\target\$target\$buildProfile\rustos-heap-allocation"
-    $image = "target\heap-allocation\rustos-heap-allocation-bios.img"
+    $elf = "examples\heap-allocation\target\$target\$buildProfile\gtos-heap-allocation"
+    $image = "target\heap-allocation\gtos-heap-allocation-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

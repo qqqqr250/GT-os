@@ -63,8 +63,8 @@ try {
     if (-not (Test-Toolchain)) { exit 1 }
 
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
-    $elf = "examples\double-faults\target\$target\$buildProfile\rustos-double-faults"
-    $image = "target\double-faults\rustos-double-faults-bios.img"
+    $elf = "examples\double-faults\target\$target\$buildProfile\gtos-double-faults"
+    $image = "target\double-faults\gtos-double-faults-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

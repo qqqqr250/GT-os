@@ -1,4 +1,4 @@
-//! In-QEMU tests for the `rustos-paging` kernel.
+//! In-QEMU tests for the `gtos-paging` kernel.
 //!
 //! These drive the crate's *public* API from a separate test binary: `cargo test`
 //! links this file for `x86_64-unknown-none`, the runner in `runner/` wraps it in
@@ -19,14 +19,14 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_paging::test_runner)]
+#![test_runner(gtos_paging::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_paging::{halt_forever, interrupts, memory, serial};
+use gtos_paging::{halt_forever, interrupts, memory, serial};
 
 /// A free virtual page (`PML4` index 144) the mapping test uses.
 const TEST_PAGE: u64 = 0x0000_4800_0000_0000;
@@ -44,7 +44,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // The GDT/TSS must be loaded before the IDT names the double-fault IST slot,
     // and `interrupts::init` remaps the PIC, starts the PIT and enables
     // interrupts, so the timer is already ticking when the harness runs.
-    let _ = rustos_paging::gdt::init();
+    let _ = gtos_paging::gdt::init();
     interrupts::init();
 
     let offset = boot_info
@@ -61,7 +61,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_paging::test_panic_handler(info)
+    gtos_paging::test_panic_handler(info)
 }
 
 #[test_case]

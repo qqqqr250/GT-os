@@ -59,8 +59,8 @@ try {
     $buildProfile = if ($Release) { 'release' } else { 'debug' }
     $manifest = 'examples\minimal\Cargo.toml'
     $target = 'x86_64-unknown-none'
-    $elf = "examples\minimal\target\$target\$buildProfile\rustos-minimal"
-    $image = "target\minimal\rustos-minimal-bios.img"
+    $elf = "examples\minimal\target\$target\$buildProfile\gtos-minimal"
+    $image = "target\minimal\gtos-minimal-bios.img"
 
     Write-Host "building $manifest ($buildProfile)" -ForegroundColor Cyan
     $cargoArgs = @('build', '--manifest-path', $manifest, '--target', $target)

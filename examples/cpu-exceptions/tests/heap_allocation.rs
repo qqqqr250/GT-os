@@ -1,4 +1,4 @@
-//! In-QEMU tests for the post-10 heap hook in `rustos-cpu-exceptions`.
+//! In-QEMU tests for the post-10 heap hook in `gtos-cpu-exceptions`.
 //!
 //! The crate is post-05, so its focus is the IDT, but it also carries post-07's
 //! PIC/PIT, post-08's [`memory`] module and post-10's [`allocator`] module
@@ -23,7 +23,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![test_runner(rustos_cpu_exceptions::test_runner)]
+#![test_runner(gtos_cpu_exceptions::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 // The tests allocate through the global allocator, so they need the `alloc`
@@ -36,7 +36,7 @@ use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_cpu_exceptions::{allocator, halt_forever, interrupts, memory, serial};
+use gtos_cpu_exceptions::{allocator, halt_forever, interrupts, memory, serial};
 
 static TEST_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -67,12 +67,12 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_cpu_exceptions::test_panic_handler(info)
+    gtos_cpu_exceptions::test_panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_cpu_exceptions::alloc_error_handler(layout)
+    gtos_cpu_exceptions::alloc_error_handler(layout)
 }
 
 #[test_case]

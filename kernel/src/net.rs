@@ -1491,7 +1491,7 @@ fn fetch_once(url: &Url) -> Result<Response, String> {
         .ok_or_else(|| format!("Could not connect to {}:{}", url.host, url.port))?;
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RustOS/0.1 (pre-alpha)\r\nAccept: */*\r\nAccept-Language: en\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: GTos/0.1 (pre-alpha)\r\nAccept: */*\r\nAccept-Language: en\r\nConnection: close\r\n\r\n",
         url.path,
         url.authority()
     );

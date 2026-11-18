@@ -1,5 +1,5 @@
 //! The bootable binary: the bootloader's entry point into the
-//! `rustos-heap-allocation` library.
+//! `gtos-heap-allocation` library.
 //!
 //! All of the logic lives in the library (`src/lib.rs`); this file only owns the
 //! bootloader configuration, the `_start` entry point that [`entry_point`]
@@ -28,15 +28,15 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    rustos_heap_allocation::kernel_main(boot_info)
+    gtos_heap_allocation::kernel_main(boot_info)
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    rustos_heap_allocation::panic_handler(info)
+    gtos_heap_allocation::panic_handler(info)
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    rustos_heap_allocation::alloc_error_handler(layout)
+    gtos_heap_allocation::alloc_error_handler(layout)
 }

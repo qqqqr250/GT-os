@@ -1,4 +1,4 @@
-//! In-QEMU test for the post-08 paging hook in `rustos-double-faults`.
+//! In-QEMU test for the post-08 paging hook in `gtos-double-faults`.
 //!
 //! The crate is post-06, so its focus is the double-fault handler and its IST
 //! stack, but it also carries post-07's PIC/PIT and post-08's [`memory`] module
@@ -20,14 +20,14 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_double_faults::test_runner)]
+#![test_runner(gtos_double_faults::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_double_faults::{gdt, halt_forever, interrupts, memory, serial};
+use gtos_double_faults::{gdt, halt_forever, interrupts, memory, serial};
 
 /// A free virtual page (`PML4` index 144) the mapping test uses.
 const TEST_PAGE: u64 = 0x0000_4800_0000_0000;
@@ -62,7 +62,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_double_faults::test_panic_handler(info)
+    gtos_double_faults::test_panic_handler(info)
 }
 
 #[test_case]

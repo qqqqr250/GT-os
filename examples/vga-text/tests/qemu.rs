@@ -13,7 +13,7 @@
 //! tracked colour — and leaves the cell contents to the host unit tests.
 //!
 //! It also covers post-05's IDT: a breakpoint raised with `int3` must be handled
-//! and must return (see [`rustos_vga_text::testing::breakpoint_round_trip`]).
+//! and must return (see [`gtos_vga_text::testing::breakpoint_round_trip`]).
 
 #![no_std]
 #![no_main]
@@ -25,8 +25,8 @@ use core::panic::PanicInfo;
 
 use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_vga_text::testing::{QemuExitCode, exit_qemu, init_serial};
-use rustos_vga_text::{println, vga_buffer};
+use gtos_vga_text::testing::{QemuExitCode, exit_qemu, init_serial};
+use gtos_vga_text::{println, vga_buffer};
 
 /// The test needs the physical-memory window to reach `0xb8000`.
 static TEST_CONFIG: BootloaderConfig = {
@@ -50,7 +50,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     check("the writer initializes", vga_buffer::is_initialized());
 
     // Exercising the volatile device writes must not fault.
-    vga_buffer::write_str("RustOS");
+    vga_buffer::write_str("GTos");
     vga_buffer::set_fg(vga_buffer::Color::LightGreen);
     check(
         "the colour is tracked",
@@ -72,7 +72,7 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // `int3`; the handler must run exactly once and execution must continue.
     check(
         "a breakpoint is handled and returns",
-        rustos_vga_text::testing::breakpoint_round_trip() == 1,
+        gtos_vga_text::testing::breakpoint_round_trip() == 1,
     );
 
     println!("[ok]");

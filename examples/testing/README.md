@@ -1,10 +1,10 @@
-# RustOS testing — `blog_os` post-04, done properly
+# GTos testing — `blog_os` post-04, done properly
 
 This is a tiny, standalone crate that starts from
 [`blog_os` post-04](https://github.com/phil-opp/blog_os/tree/post-04) — the
 *Testing* post, which builds a minimal bare-metal kernel and a custom test
 framework that runs it inside QEMU — and rebuilds it as something you would
-actually ship. It is deliberately *not* part of the main RustOS workspace, so it
+actually ship. It is deliberately *not* part of the main GTos workspace, so it
 can be built and tested on its own.
 
 It is the sibling of [`examples/minimal`](../minimal/README.md) (post-02) and

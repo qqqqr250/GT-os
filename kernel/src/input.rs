@@ -17,7 +17,7 @@ static HEAD: AtomicUsize = AtomicUsize::new(0);
 static TAIL: AtomicUsize = AtomicUsize::new(0);
 
 /// Control codes for the non-ASCII keys the desktop cares about (the arrow and
-/// paging keys, plus the Windows key). They sit above the printable range, so
+/// paging keys, the Windows key and F1). They sit above the printable range, so
 /// the shell's line reader ignores them and only the desktop reacts.
 pub const KEY_UP: u8 = 0x80;
 pub const KEY_DOWN: u8 = 0x81;
@@ -28,6 +28,8 @@ pub const KEY_PAGE_DOWN: u8 = 0x85;
 pub const KEY_HOME: u8 = 0x86;
 pub const KEY_END: u8 = 0x87;
 pub const KEY_WINDOWS: u8 = 0x88;
+/// F1 opens the Browser window from anywhere on the desktop.
+pub const KEY_BROWSER: u8 = 0x89;
 
 /// Set by the COM1 interrupt the first time a serial byte arrives.
 ///

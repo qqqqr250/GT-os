@@ -19,13 +19,13 @@ fn main() {
             .expect("kernel artifact dependency missing"),
     );
 
-    let bios_path = out_dir.join("rustos-bios.img");
+    let bios_path = out_dir.join("gtos-bios.img");
     bootloader::BiosBoot::new(&kernel)
         .create_disk_image(&bios_path)
         .expect("failed to create the BIOS disk image");
     println!("cargo:rustc-env=BIOS_PATH={}", bios_path.display());
 
-    let uefi_path = out_dir.join("rustos-uefi.img");
+    let uefi_path = out_dir.join("gtos-uefi.img");
     bootloader::UefiBoot::new(&kernel)
         .create_disk_image(&uefi_path)
         .expect("failed to create the UEFI disk image");
@@ -34,7 +34,7 @@ fn main() {
     // The ISO reuses the BIOS MBR image and a FAT partition holding
     // `efi/boot/bootx64.efi`, which is exactly what an El Torito UEFI entry
     // wants.
-    let uefi_fat_path = out_dir.join("rustos-uefi-fat.img");
+    let uefi_fat_path = out_dir.join("gtos-uefi-fat.img");
     bootloader::DiskImageBuilder::new(kernel)
         .create_uefi_fat_partition(&uefi_fat_path)
         .expect("failed to create the UEFI FAT partition");
@@ -43,19 +43,19 @@ fn main() {
         iso::build(&out_dir, &bios_path, &uefi_fat_path).expect("failed to create the ISO image");
     println!("cargo:rustc-env=ISO_PATH={}", iso_path.display());
 
-    // The RustOS data disk: a small FAT16 volume attached as the primary IDE
+    // The GTos data disk: a small FAT16 volume attached as the primary IDE
     // slave. It is created only when missing, so files written from inside the
     // guest survive a rebuild. It lives in the project root, next to Cargo.toml.
     let manifest = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
     );
-    let data_path = manifest.join("rustos-data.img");
+    let data_path = manifest.join("gtos-data.img");
     if !data_path.exists() {
-        let readme = "RustOS data disk\r\n\
+        let readme = "GTos data disk\r\n\
             ================\r\n\
             \r\n\
             This is a FAT16 volume on the primary IDE slave (drive 1).\r\n\
-            Inside RustOS, use the shell commands to work with it:\r\n\
+            Inside GTos, use the shell commands to work with it:\r\n\
             \r\n\
             \x20 disks          show the ATA drives\r\n\
             \x20 ls             list the root directory\r\n\

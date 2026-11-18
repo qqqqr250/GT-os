@@ -1,4 +1,4 @@
-//! `RustOS` kernel binary: the bootloader's entry point into the `kernel` crate.
+//! `GTos` kernel binary: the bootloader's entry point into the `kernel` crate.
 //!
 //! All of the kernel lives in the `kernel` library (see `src/lib.rs`); this file
 //! only owns the bootloader configuration, the `_start` entry point that the

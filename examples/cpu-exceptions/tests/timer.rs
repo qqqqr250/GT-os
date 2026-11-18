@@ -1,4 +1,4 @@
-//! In-QEMU test for the post-07 hardware-interrupt hook in `rustos-cpu-exceptions`.
+//! In-QEMU test for the post-07 hardware-interrupt hook in `gtos-cpu-exceptions`.
 //!
 //! The crate is post-05, so its focus is the IDT, but [`interrupts::init`] also
 //! brings forward post-07's PIC/PIT setup. This test proves the timer really
@@ -16,13 +16,13 @@
 // does not apply to them.
 #![allow(clippy::missing_panics_doc)]
 #![feature(custom_test_frameworks)]
-#![test_runner(rustos_cpu_exceptions::test_runner)]
+#![test_runner(gtos_cpu_exceptions::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
 
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
-use rustos_cpu_exceptions::{halt_forever, interrupts, pic, pit, serial};
+use gtos_cpu_exceptions::{halt_forever, interrupts, pic, pit, serial};
 
 static TEST_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
 
@@ -39,7 +39,7 @@ fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    rustos_cpu_exceptions::test_panic_handler(info)
+    gtos_cpu_exceptions::test_panic_handler(info)
 }
 
 #[test_case]
