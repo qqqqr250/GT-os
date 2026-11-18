@@ -3,6 +3,9 @@
 A small, bootable x86_64 operating system written from scratch in Rust — no
 Linux, no `std`, no libc.
 
+> **Pre-alpha:** RustOS is an experimental hobby OS. Expect incomplete features,
+> bugs and breaking changes; it is not ready for daily use.
+
 ![RustOS running in QEMU](docs/screenshot.png)
 
 ## The RustOS Manual
