@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "blog_os post-06, done properly: a minimal bare-metal kernel that catches double faults on a dedicated IST stack"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 publish = false
 
 # Standalone on purpose: this teaching crate must not join the RustOS workspace,
