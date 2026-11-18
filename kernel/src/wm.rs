@@ -65,7 +65,7 @@ const MENU_HEADER: usize = 44;
 const MENU_ITEM_HEIGHT: usize = 24;
 const MENU_ITEMS: [&str; 7] = [
     "My Computer",
-    "Control Panel",
+    "Settings",
     "Command Prompt",
     "Run...",
     "About RustOS",
@@ -134,7 +134,7 @@ pub enum WindowContent {
     MyComputer,
     MyDocuments,
     Browser,
-    ControlPanel,
+    Settings,
     CommandPrompt,
     Run,
     LogOff,
@@ -149,7 +149,7 @@ impl WindowContent {
             WindowContent::About => (400, 280),
             WindowContent::MyDocuments => (460, 320),
             WindowContent::Browser => (520, 360),
-            WindowContent::ControlPanel => (420, 320),
+            WindowContent::Settings => (420, 320),
             WindowContent::CommandPrompt => (480, 300),
             WindowContent::Run => (380, 190),
             WindowContent::LogOff => (320, 170),
@@ -177,8 +177,8 @@ pub struct Desktop {
     spawn_count: usize,
     /// Which Start-menu entry the pointer is over, if any.
     menu_hover: Option<usize>,
-    /// Index of the selected Control Panel icon (if any).
-    cp_selected: Option<usize>,
+    /// Index of the selected Settings icon (if any).
+    settings_selected: Option<usize>,
     /// When true, window content (text) is skipped during rendering to keep
     /// dragging smooth.
     skip_content: bool,
@@ -241,7 +241,7 @@ impl Desktop {
             dragging_window: None,
             spawn_count: 0,
             menu_hover: None,
-            cp_selected: None,
+            settings_selected: None,
             skip_content: false,
             cp_output: alloc::string::String::new(),
             cp_input: [0; 128],
@@ -1288,14 +1288,14 @@ impl Desktop {
                     }
                 }
             }
-            WindowContent::ControlPanel => {
-                self.draw_text(cx, cy, "Control Panel", COL_TEXT, 1);
+            WindowContent::Settings => {
+                self.draw_text(cx, cy, "Settings", COL_TEXT, 1);
                 let labels = ["Display", "Sound", "Mouse", "Keyboard", "System", "Network"];
                 for (i, label) in labels.iter().enumerate() {
                     let ix = cx + (i % 3) * 124;
                     let iy = cy + 26 + (i / 3) * 72;
                     // Highlight the selected icon.
-                    if self.cp_selected == Some(i) {
+                    if self.settings_selected == Some(i) {
                         self.fill_rect_xy(ix - 4, iy - 4, 40, 52, Color(0xD0_E0_F8));
                         self.draw_rect_border(
                             Rect {
@@ -1321,7 +1321,7 @@ impl Desktop {
                     );
                     self.draw_text(ix, iy + 38, label, COL_TEXT, 1);
                 }
-                if let Some(i) = self.cp_selected {
+                if let Some(i) = self.settings_selected {
                     let labels = ["Display", "Sound", "Mouse", "Keyboard", "System", "Network"];
                     self.draw_text(cx, cy + 170, "Selected:", COL_TEXT, 1);
                     self.draw_text(cx + 70, cy + 170, labels[i], Color(0x00_58_EE), 1);
@@ -1847,15 +1847,15 @@ impl Desktop {
                 }
             }
 
-            // Control Panel: clicking an icon selects it.
-            if w.content == WindowContent::ControlPanel {
+            // Settings: clicking an icon selects it.
+            if w.content == WindowContent::Settings {
                 let cx = r.x + BORDER_WIDTH + 8;
                 let cy = r.y + TITLE_BAR_HEIGHT + 8;
                 for ii in 0..6usize {
                     let ix = cx + (ii % 3) * 124;
                     let iy = cy + 26 + (ii / 3) * 72;
                     if x >= ix && x < ix + 32 && y >= iy && y < iy + 32 {
-                        self.cp_selected = Some(ii);
+                        self.settings_selected = Some(ii);
                         break;
                     }
                 }
@@ -1945,7 +1945,7 @@ impl Desktop {
                 self.spawn_window("My Computer", WindowContent::MyComputer);
             }
             1 => {
-                self.spawn_window("Control Panel", WindowContent::ControlPanel);
+                self.spawn_window("Settings", WindowContent::Settings);
             }
             2 => {
                 self.spawn_window("Command Prompt", WindowContent::CommandPrompt);

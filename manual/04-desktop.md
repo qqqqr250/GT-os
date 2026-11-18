@@ -13,7 +13,7 @@ flickering through a full-screen repaint:
 
 - a vertical blue gradient wallpaper,
 - a taskbar along the bottom with a green **start** button that opens a Start
-  menu; the Start-menu entries open real windows (My Computer, Control Panel,
+  menu; the Start-menu entries open real windows (My Computer, Settings,
   Command Prompt, Run..., About RustOS, Log Off, Shut Down), and the taskbar
   window buttons raise their window when clicked,
 - draggable windows with Luna-blue title bars, a close button (which frees the
