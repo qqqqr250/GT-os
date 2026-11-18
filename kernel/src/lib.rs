@@ -3,7 +3,7 @@
 //! The crate is split into this library plus a thin binary (`src/main.rs`) so
 //! that the kernel logic can be exercised by an in-QEMU test framework: the
 //! integration tests under `kernel/tests` link against this library and drive it
-//! from their own entry point (see the README's *Testing* section).
+//! from their own entry point (see `manual/11-testing.md`).
 //!
 //! The binary owns the bootloader entry point and the panic/alloc handlers; this
 //! library owns everything else.
