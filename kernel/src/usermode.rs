@@ -429,7 +429,7 @@ pub fn demo_program() -> Vec<u8> {
 
 /// Maps the user program and stack pages on first use.
 fn ensure_mapped() -> Result<(), &'static str> {
-    if MAPPED.swap(true, Ordering::SeqCst) {
+    if MAPPED.load(Ordering::SeqCst) {
         return Ok(());
     }
 
@@ -466,6 +466,11 @@ fn ensure_mapped() -> Result<(), &'static str> {
                 .flush();
         }
     }
+
+    // Publish the latch only after every page is mapped: if the loop above
+    // fails, `run` reports the error, and a later call must retry the mapping
+    // rather than skip it and fault on an unmapped `USER_BASE`.
+    MAPPED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
