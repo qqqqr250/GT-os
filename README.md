@@ -31,7 +31,6 @@ The manual lives in [`manual/`](manual/), which is its authoritative source.
 **Boot and packaging**
 
 - [Bootable ISO and Ventoy](manual/09-bootable-iso.md)
-- [Linux package](manual/10-linux-package.md)
 
 **The Rest**
 

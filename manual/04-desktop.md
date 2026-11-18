@@ -19,8 +19,39 @@ flickering through a full-screen repaint:
 - draggable windows with Luna-blue title bars, a close button (which frees the
   slot so a window can be reopened), and a drop shadow; the desktop starts empty
   at boot and windows open on demand from the Start menu, the desktop icons or
-  **F1** (Browser), while the Windows key toggles the Start menu,
+  **F1** (Browser) or **F2** (file manager), while the Windows key toggles the
+  Start menu,
+- a Browser with clickable links (**Tab** cycles through them, **Enter**
+  follows the focused one) and address-bar web search,
 - a classic 12x19 arrow pointer whose hotspot is the top-left pixel.
+
+## File manager
+
+**My Computer** (Start menu, desktop icon or **F2**) is a real file manager, not a
+static panel. It reads the mounted FAT16 data disk through `kernel\src\fat.rs`
+and shows the root directory with folder/file icons, a Quick Access sidebar,
+an address bar, a search field and a status bar. **My Documents** opens the
+same explorer.
+
+- Click **Name**, **Size** or **Type** (toolbar button or column header) to
+  sort; click again to reverse the direction. Folders stay above files.
+- Type in the search field to filter instantly (case-insensitive substring,
+  with `*` as a wildcard, e.g. `*.WAV`). **Backspace** deletes, **Esc** clears.
+- Use the arrow keys, Page Up/Down, Home and End to move the selection;
+  **Enter** opens it. To open with the mouse, click a row once to select it and
+  click the selected row again (**double-click**). Opening does not depend on a
+  timing window, so a slow or deliberate second click still works.
+- Text files open in a read-only Text Viewer with arrow/Page Up/Down scrolling.
+  Folders and binaries report an honest status message: this FAT16 driver only
+  handles the root directory, so there are no subfolders to descend into.
+- **Refresh** re-reads the disk, so files written by the shell (or by the
+  Command Prompt window) appear without restarting.
+
+Inspired by [Sigma File Manager](https://github.com/aleksey-hoffman/sigma-file-manager),
+this is a deliberately small clean-room version: no Tauri, Vue, tabs, split
+view, extensions or network sharing — just a compact GUI over the existing
+FAT16 layer. The filtering/sorting/formatting logic lives in `kernel\src\fm.rs`
+so it can be unit-tested without a framebuffer.
 
 Input comes from `kernel\src\mouse.rs`, a PS/2 driver for the 8042 auxiliary
 port. It configures the controller with the mouse interrupt (IRQ12) **masked**

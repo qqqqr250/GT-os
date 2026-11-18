@@ -8,6 +8,7 @@
 | `x86_64-unknown-none`, `x86_64-unknown-uefi` targets | kernel and UEFI bootloader | yes |
 | MinGW-w64 (`gcc`, `as`, `dlltool`) | GNU host linker for build scripts | yes (WinLibs via winget) |
 | QEMU 8+ (`qemu-system-x86_64`) | running the images; OVMF `edk2-*.fd` for UEFI | yes |
+| Oracle `VirtualBox` 7+ (optional) | alternate GUI host with a real PS/2 mouse | no |
 | PowerShell 5.1+ | helper scripts | Windows built-in |
 
 The repository pins the toolchain per directory (`rustup override`), so the
@@ -33,6 +34,10 @@ powershell -ExecutionPolicy Bypass -File scripts\run.ps1 uefi iso
 
 # 4. Run the kernel's in-QEMU tests (unit + integration; needs QEMU)
 cargo xtest
+
+# 4b. (Optional) create a VirtualBox VM with the BIOS disk, the FAT16 data
+#     disk and a NAT Intel 82540EM NIC; add -Start to boot it immediately
+powershell -ExecutionPolicy Bypass -File scripts\virtualbox.ps1
 
 # 5. Prove it works without clicking anything
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1

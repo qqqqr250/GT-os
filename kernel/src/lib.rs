@@ -40,6 +40,7 @@ mod audio;
 mod browser;
 mod console;
 mod fat;
+mod fm;
 mod font;
 mod input;
 mod interrupts;
@@ -196,23 +197,24 @@ fn init_usermode(physical_memory_offset: u64) {
 
 /// Brings up the RTL8139 adapter and its IPv4 stack, then asks for a DHCP lease.
 ///
-/// QEMU attaches the NIC for `-nic user,model=rtl8139` and runs a DHCP server
-/// on its user-mode network; without either the boot simply continues on the
-/// static fallback addresses.
+/// QEMU attaches an RTL8139 with `-nic user,model=rtl8139`; `VirtualBox` uses an
+/// emulated Intel 82540EM. Both run a DHCP server on their NAT network, but the
+/// boot continues on the static fallback addresses if none answers.
 fn init_network(physical_memory_offset: u64) {
     if !net::init(physical_memory_offset) {
         shell::status(
             false,
-            format_args!("no RTL8139 NIC found (boot with -nic user,model=rtl8139)"),
+            format_args!("no supported NIC found (need an RTL8139 or an E1000)"),
         );
         return;
     }
 
-    let (io, irq) = net::adapter().unwrap_or((0, 0));
-    shell::status(
-        true,
-        format_args!("RTL8139 NIC up: I/O 0x{io:04x}, IRQ {irq}"),
-    );
+    if let Some(info) = net::adapter() {
+        shell::status(
+            true,
+            format_args!("{} NIC up: {}, IRQ {}", info.name, info.bus, info.irq),
+        );
+    }
 
     net::dhcp();
     let config = net::address();

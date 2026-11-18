@@ -570,7 +570,7 @@ fn require_network() -> bool {
     console::set_fg(console::RED);
     println!("no network adapter is up");
     console::set_fg(console::FG);
-    println!("boot QEMU with: -nic user,model=rtl8139");
+    println!("QEMU: -nic user,model=rtl8139; VirtualBox: an Intel 82540EM NIC");
     true
 }
 
@@ -578,9 +578,10 @@ fn net_info() {
     if require_network() {
         return;
     }
-    let (io, irq) = net::adapter().unwrap_or((0, 0));
+    if let Some(info) = net::adapter() {
+        println!("adapter: {}, {}, IRQ {}", info.name, info.bus, info.irq);
+    }
     let config = net::address();
-    println!("adapter: RTL8139, I/O 0x{io:04x}, IRQ {irq}");
     println!("address: {}", format_ip(net::ip()));
     println!("mask:    {}", format_ip(config.netmask));
     println!(

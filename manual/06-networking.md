@@ -1,11 +1,12 @@
 # Networking
 
-GTos speaks IPv4 on the emulated RTL8139 that QEMU attaches for
-`-nic user,model=rtl8139` (the launcher and the test scripts pass that flag).
-At boot the kernel runs a **DHCP** client, so it takes whatever address the
-network hands out; if no server answers within half a second it falls back to
-the fixed defaults you would see on any QEMU guest, which QEMU's user-mode
-network ("SLIRP") always provides:
+GTos speaks IPv4 on either of two emulated NICs: QEMU's RTL8139
+(`-nic user,model=rtl8139`, passed by the launcher and test scripts) or the
+Intel 82540EM that `VirtualBox` provides with `--nic-type 82540EM` (attached by
+`scripts\virtualbox.ps1`). `net` prints which one was found. At boot the kernel
+runs a **DHCP** client, so it takes whatever address the network hands out; if
+no server answers within half a second it falls back to the fixed defaults of
+the QEMU/`VirtualBox` NAT network:
 
 | Setting | Value |
 | --- | --- |
@@ -17,17 +18,18 @@ network ("SLIRP") always provides:
 The stack is split across two modules:
 
 - `kernel/src/pci.rs` scans PCI bus 0 through the `0xCF8`/`0xCFC` configuration
-  ports, finds the adapter, and enables its I/O space and bus-master bit.
-- `kernel/src/net.rs` is the driver and the protocol stack: the RTL8139 receive
-  ring and four transmit descriptors, Ethernet framing, ARP, IPv4, ICMP echo,
-  UDP, a DNS resolver, a synchronous TCP client, `embedded-tls` for HTTPS, and a
-  small URL/HTTP client behind `fetch_url`.
+  ports, finds the adapter, and enables its I/O, memory-space and bus-master bits.
+- `kernel/src/net.rs` holds both drivers and the protocol stack: the RTL8139
+  linear ring, the E1000 descriptor rings (32 RX / 8 TX), and above them Ethernet
+  framing, ARP, IPv4, ICMP echo, UDP, a DNS resolver, a synchronous TCP client,
+  `embedded-tls` for HTTPS, and a small URL/HTTP client behind `fetch_url`.
 
-The driver is **polled** from the shell rather than interrupt-driven, so the
-whole stack stays single-threaded and the receive path is a plain "read the ring,
-advance `CAPR`" loop. DMA buffers are carved out of the kernel heap, which lives
-in the bootloader's physical-memory window, so the physical address the NIC needs
-is simply `virtual_address - physical_memory_offset`.
+Both drivers are **polled** from the shell rather than interrupt-driven, so the
+whole stack stays single-threaded. DMA buffers are carved out of the kernel heap,
+which lives in the bootloader's physical-memory window, so the physical address
+the NIC needs is simply `virtual_address - physical_memory_offset`. The E1000's
+MMIO registers are reached through the same window at
+`physical_memory_offset + BAR0`.
 
 Try it from the shell:
 
@@ -75,15 +77,27 @@ with a scrollbar and a browser-style status bar. The fetch blocks the UI for its
 duration, then returns to normal; the arrow and Page Up/Down keys scroll the
 rendered page.
 
+Links are real navigation targets: click a link, or press **Tab** to cycle
+through the links and **Enter** to follow the focused one (it is highlighted on
+the page). Relative hrefs are resolved against the current address, and the bar
+is updated with the final URL after redirects. Typing words separated by spaces
+in the address bar performs a Google search, because search-result pages are
+ordinary HTML that this renderer can show. Very large script-only app shells
+(such as `YouTube`) display an honest "This page needs JavaScript" notice rather
+than an empty viewport.
+
 `fetch_url` accepts `http://`, `https://` and bare `host/path` addresses, follows
 up to five redirects, decodes `Transfer-Encoding: chunked`, and does not ask for
-compression (so most pages arrive as plain HTML). HTTPS uses TLS 1.3 through the
+compression (so most pages arrive as plain HTML). Response bodies are decoded as
+UTF-8 when valid, and as Latin-1/Windows-1252 when the server declares that
+charset, so accented characters and smart quotes stay readable. HTTPS uses TLS 1.3 through the
 `embedded-tls` crate. Because the kernel has neither a root certificate store
 nor a wall clock, **certificate and hostname checks are disabled**: the
 connection is encrypted against passive observers but is vulnerable to an
 active man-in-the-middle. Treat HTTPS as a pre-alpha experiment, not a secure
 browser. Sites that need TLS 1.2 only, JavaScript, full CSS layout, working
-forms or cookies will still look incomplete or not work properly. External CSS,
+forms or cookies will still look incomplete or not work properly (script-only
+sites show the notice described above). External CSS,
 images and scripts are not fetched separately, so most pages keep their default
 styling rather than the site's own design.
 

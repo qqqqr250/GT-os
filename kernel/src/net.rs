@@ -117,6 +117,52 @@ const TX_COUNT: usize = 4;
 const TX_BUF: usize = 2048;
 const DMA_BYTES: usize = RX_TOTAL + TX_COUNT * TX_BUF;
 
+// ---------------------------------------------------------------------------
+// Intel E1000 (8254x) registers and ring geometry
+// ---------------------------------------------------------------------------
+
+/// `VirtualBox`'s `--nic-type 82540EM` presents this PCI device.
+const E1000_VENDOR: u16 = 0x8086;
+const E1000_DEVICE_IDS: &[u16] = &[0x100E, 0x100F, 0x1010, 0x1011, 0x101D, 0x1018];
+
+const E1000_CTRL: u32 = 0x0000_0000;
+const E1000_RCTL: u32 = 0x0000_0100;
+const E1000_TCTL: u32 = 0x0000_0400;
+const E1000_TIPG: u32 = 0x0000_0410;
+const E1000_RDBAL: u32 = 0x0000_2800;
+const E1000_RDBAH: u32 = 0x0000_2804;
+const E1000_RDLEN: u32 = 0x0000_2808;
+const E1000_RDH: u32 = 0x0000_2810;
+const E1000_RDT: u32 = 0x0000_2818;
+const E1000_TDBAL: u32 = 0x0000_3800;
+const E1000_TDBAH: u32 = 0x0000_3804;
+const E1000_TDLEN: u32 = 0x0000_3808;
+const E1000_TDH: u32 = 0x0000_3810;
+const E1000_TDT: u32 = 0x0000_3818;
+const E1000_RAL: u32 = 0x0000_5400;
+const E1000_RAH: u32 = 0x0000_5404;
+
+const E1000_CTRL_RST: u32 = 1 << 26;
+const E1000_CTRL_SLU: u32 = 1 << 6;
+const E1000_RCTL_EN: u32 = 1 << 1;
+const E1000_RCTL_BAM: u32 = 1 << 2;
+const E1000_RCTL_UPE: u32 = 1 << 3;
+const E1000_RCTL_MPE: u32 = 1 << 4;
+const E1000_TCTL_EN: u32 = 1 << 1;
+const E1000_TCTL_PSP: u32 = 1 << 3;
+const E1000_RAH_AV: u32 = 1 << 31;
+
+const E1000_DESC_SIZE: usize = 16;
+const E1000_RX_DESCS: usize = 32;
+const E1000_TX_DESCS: usize = 8;
+const E1000_BUF_SIZE: usize = FRAME_BYTES;
+
+const E1000_RX_DESC_OFF: usize = 0;
+const E1000_RX_BUF_OFF: usize = E1000_RX_DESC_OFF + E1000_RX_DESCS * E1000_DESC_SIZE;
+const E1000_TX_DESC_OFF: usize = E1000_RX_BUF_OFF + E1000_RX_DESCS * E1000_BUF_SIZE;
+const E1000_TX_BUF_OFF: usize = E1000_TX_DESC_OFF + E1000_TX_DESCS * E1000_DESC_SIZE;
+const E1000_DMA_BYTES: usize = E1000_TX_BUF_OFF + E1000_TX_DESCS * E1000_BUF_SIZE;
+
 /// The largest frame we will ever hand back to the protocol layer.
 const FRAME_BYTES: usize = 2048;
 
@@ -129,18 +175,37 @@ const DNS_TIMEOUT: u64 = 300;
 /// Timeout for TCP segments.
 const TCP_TIMEOUT: u64 = 500;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NicKind {
+    Rtl8139,
+    E1000,
+}
+
 struct Nic {
+    kind: NicKind,
+    /// RTL8139 I/O base (zero for the E1000).
     io: u16,
+    /// E1000 MMIO base, virtual and physical (zero for the RTL8139).
+    mmio: usize,
+    mmio_phys: u32,
     irq: u8,
     /// Virtual-to-physical offset for the DMA region.
     offset: u64,
-    /// One leaked region: the RX ring followed by the four TX buffers.
+    /// One leaked region holding both rings and their buffers.
     dma: &'static mut [u8],
+    /// RTL8139 receive-ring byte offset / E1000 next RX descriptor.
     rx_read: usize,
     tx_next: usize,
 }
 
 static NIC: Mutex<Option<Nic>> = Mutex::new(None);
+
+/// Description of the adapter that was brought up, for diagnostics.
+pub struct AdapterInfo {
+    pub name: &'static str,
+    pub bus: String,
+    pub irq: u8,
+}
 
 /// A resolved ARP entry.
 static ARP_CACHE: Mutex<Vec<([u8; 4], [u8; 6])>> = Mutex::new(Vec::new());
@@ -149,15 +214,145 @@ static ARP_CACHE: Mutex<Vec<([u8; 4], [u8; 6])>> = Mutex::new(Vec::new());
 // Driver
 // ---------------------------------------------------------------------------
 
-/// Probes for the RTL8139 and brings it up.
+/// Probes for a supported NIC and brings it up.
 ///
-/// Returns `false` when no supported adapter is present. `physical_memory_offset`
-/// is `BootInfo::physical_memory_offset`, used to turn the heap addresses of the
-/// DMA buffers into the physical addresses the NIC needs.
+/// Tries QEMU's RTL8139 first, then the Intel 8254x family `VirtualBox` emulates.
+/// Returns `false` when neither is present. `physical_memory_offset` is
+/// `BootInfo::physical_memory_offset`, used both for DMA addresses and to reach
+/// the E1000's MMIO registers.
 pub fn init(physical_memory_offset: u64) -> bool {
-    let Some(device) = pci::find(VENDOR, DEVICE) else {
-        return false;
-    };
+    if let Some(device) = pci::find(VENDOR, DEVICE) {
+        return rtl8139_init(device, physical_memory_offset);
+    }
+    // First try the known 8254x device IDs.
+    for id in E1000_DEVICE_IDS {
+        if let Some(device) = pci::find(E1000_VENDOR, *id) {
+            if let Some(nic) = e1000_init(device, physical_memory_offset) {
+                *NIC.lock() = Some(nic);
+                return true;
+            }
+        }
+    }
+    // Fallback: any Intel network controller (class 0x02) whose BAR0 is an MMIO
+    // address. VirtualBox has been seen to report a different device ID than
+    // the canonical 82540EM value for the same emulated chip.
+    let mut found = None;
+    pci::scan(|device| {
+        if found.is_some() {
+            return;
+        }
+        if device.vendor == E1000_VENDOR && device.class == 0x02 && device.bar0 & 0xFFFF_FFF0 != 0 {
+            found = Some(device);
+        }
+    });
+    if let Some(device) = found {
+        if let Some(nic) = e1000_init(device, physical_memory_offset) {
+            *NIC.lock() = Some(nic);
+            return true;
+        }
+    }
+    false
+}
+
+/// Volatile 32-bit read from an MMIO register.
+unsafe fn mmio_read32(base: usize, offset: u32) -> u32 {
+    // SAFETY: the caller guarantees `base + offset` is a valid MMIO register.
+    unsafe { core::ptr::read_volatile((base + offset as usize) as *const u32) }
+}
+
+/// Volatile 32-bit write to an MMIO register.
+unsafe fn mmio_write32(base: usize, offset: u32, value: u32) {
+    // SAFETY: the caller guarantees `base + offset` is a valid MMIO register.
+    unsafe { core::ptr::write_volatile((base + offset as usize) as *mut u32, value) }
+}
+
+/// Brings up an Intel 8254x (E1000) with descriptor rings in the DMA region.
+fn e1000_init(device: pci::Device, physical_memory_offset: u64) -> Option<Nic> {
+    pci::enable(&device);
+    let phys = device.bar0 & 0xFFFF_FFF0;
+    if phys == 0 {
+        return None;
+    }
+    let mmio = (physical_memory_offset + u64::from(phys)) as usize;
+    let dma = alloc_dma(E1000_DMA_BYTES);
+
+    // SAFETY: `mmio` is the adapter's MMIO BAR, mapped by the bootloader as
+    // part of the physical-memory window; the DMA region is leaked and fixed.
+    unsafe {
+        // Reset the chip and wait for self-clear.
+        mmio_write32(mmio, E1000_CTRL, E1000_CTRL_RST);
+        for _ in 0..100_000 {
+            if mmio_read32(mmio, E1000_CTRL) & E1000_CTRL_RST == 0 {
+                break;
+            }
+        }
+
+        // Program a receive address. Promiscuous unicast/multicast is enabled
+        // below so packets are accepted even if the hypervisor overrides it.
+        let ral = u32::from_le_bytes([MAC[0], MAC[1], MAC[2], MAC[3]]);
+        let rah = u32::from(u16::from_le_bytes([MAC[4], MAC[5]])) | E1000_RAH_AV;
+        mmio_write32(mmio, E1000_RAL, ral);
+        mmio_write32(mmio, E1000_RAH, rah);
+
+        // Fill the RX descriptors with their buffer addresses.
+        for index in 0..E1000_RX_DESCS {
+            let desc = E1000_RX_DESC_OFF + index * E1000_DESC_SIZE;
+            let buf = E1000_RX_BUF_OFF + index * E1000_BUF_SIZE;
+            let address = physical(dma[buf..].as_ptr(), physical_memory_offset);
+            dma[desc..desc + 4].copy_from_slice(&address.to_le_bytes());
+            dma[desc + 4..desc + 8].fill(0);
+            dma[desc + 8..desc + E1000_DESC_SIZE].fill(0); // status = 0 (no DD)
+        }
+        let rx_base = physical(dma[E1000_RX_DESC_OFF..].as_ptr(), physical_memory_offset);
+        mmio_write32(mmio, E1000_RDBAL, rx_base);
+        mmio_write32(mmio, E1000_RDBAH, 0);
+        mmio_write32(mmio, E1000_RDLEN, (E1000_RX_DESCS * E1000_DESC_SIZE) as u32);
+        mmio_write32(mmio, E1000_RDH, 0);
+        mmio_write32(mmio, E1000_RDT, (E1000_RX_DESCS - 1) as u32);
+
+        // TX descriptors start empty; buffers are filled on transmission.
+        for index in 0..E1000_TX_DESCS {
+            let desc = E1000_TX_DESC_OFF + index * E1000_DESC_SIZE;
+            dma[desc..desc + E1000_DESC_SIZE].fill(0);
+        }
+        let tx_base = physical(dma[E1000_TX_DESC_OFF..].as_ptr(), physical_memory_offset);
+        mmio_write32(mmio, E1000_TDBAL, tx_base);
+        mmio_write32(mmio, E1000_TDBAH, 0);
+        mmio_write32(mmio, E1000_TDLEN, (E1000_TX_DESCS * E1000_DESC_SIZE) as u32);
+        mmio_write32(mmio, E1000_TDH, 0);
+        mmio_write32(mmio, E1000_TDT, 0);
+
+        // Inter-packet gap, then enable RX/TX.
+        mmio_write32(mmio, E1000_TIPG, 0x0060_200A);
+        mmio_write32(
+            mmio,
+            E1000_RCTL,
+            E1000_RCTL_EN | E1000_RCTL_BAM | E1000_RCTL_UPE | E1000_RCTL_MPE,
+        );
+        mmio_write32(
+            mmio,
+            E1000_TCTL,
+            E1000_TCTL_EN | E1000_TCTL_PSP | (0x10 << 4) | (0x40 << 12),
+        );
+        // Force the link up (VirtualBox reports it up, but this is harmless).
+        mmio_write32(mmio, E1000_CTRL, E1000_CTRL_SLU);
+    }
+
+    Some(Nic {
+        kind: NicKind::E1000,
+        io: 0,
+        mmio,
+        mmio_phys: phys,
+        irq: device.irq,
+        offset: physical_memory_offset,
+        dma,
+        rx_read: 0,
+        tx_next: 0,
+    })
+}
+
+/// Brings up QEMU's RTL8139.
+fn rtl8139_init(device: pci::Device, physical_memory_offset: u64) -> bool {
     pci::enable(&device);
 
     let io = (device.bar0 & 0xFFFC) as u16;
@@ -207,7 +402,10 @@ pub fn init(physical_memory_offset: u64) -> bool {
     }
 
     *NIC.lock() = Some(Nic {
+        kind: NicKind::Rtl8139,
         io,
+        mmio: 0,
+        mmio_phys: 0,
         irq: device.irq,
         offset: physical_memory_offset,
         dma,
@@ -222,9 +420,19 @@ pub fn is_up() -> bool {
     NIC.lock().is_some()
 }
 
-/// `(I/O base, IRQ line)` of the adapter, if one is up.
-pub fn adapter() -> Option<(u16, u8)> {
-    NIC.lock().as_ref().map(|nic| (nic.io, nic.irq))
+/// Description of the adapter, if one is up.
+pub fn adapter() -> Option<AdapterInfo> {
+    NIC.lock().as_ref().map(|nic| AdapterInfo {
+        name: match nic.kind {
+            NicKind::Rtl8139 => "RTL8139",
+            NicKind::E1000 => "Intel E1000",
+        },
+        bus: match nic.kind {
+            NicKind::Rtl8139 => alloc::format!("I/O 0x{:04x}", nic.io),
+            NicKind::E1000 => alloc::format!("MMIO 0x{:08x}", nic.mmio_phys),
+        },
+        irq: nic.irq,
+    })
 }
 
 /// Leaks a zeroed, 16-byte-aligned DMA region from the kernel heap.
@@ -248,8 +456,15 @@ fn physical(virtual_address: *const u8, offset: u64) -> u32 {
 fn receive(out: &mut [u8]) -> Option<usize> {
     let mut guard = NIC.lock();
     let nic = guard.as_mut()?;
-    let io = nic.io;
+    match nic.kind {
+        NicKind::Rtl8139 => rtl8139_receive(nic, out),
+        NicKind::E1000 => e1000_receive(nic, out),
+    }
+}
 
+/// RTL8139 receive path, using its linear ring and CAPR register.
+fn rtl8139_receive(nic: &mut Nic, out: &mut [u8]) -> Option<usize> {
+    let io = nic.io;
     // SAFETY: `io` is the adapter's I/O BAR.
     let empty = unsafe { Port::<u8>::new(io + REG_CMD).read() } & CMD_RX_EMPTY != 0;
     if empty {
@@ -282,12 +497,54 @@ fn receive(out: &mut [u8]) -> Option<usize> {
     Some(copied)
 }
 
+/// E1000 receive path: check the next descriptor's DD bit, copy its buffer,
+/// then hand the descriptor back by advancing RDT.
+fn e1000_receive(nic: &mut Nic, out: &mut [u8]) -> Option<usize> {
+    let index = nic.rx_read % E1000_RX_DESCS;
+    let desc = E1000_RX_DESC_OFF + index * E1000_DESC_SIZE;
+    // Legacy RX descriptor: length at 8..10, checksum at 10..12, status at 12.
+    // The NIC writes these fields, so read them volatilely. Byte-at-a-time
+    // access avoids an unaligned 16-bit pointer from the byte-granular slice.
+    // SAFETY: all offsets lie inside the leaked DMA region.
+    let status = unsafe { core::ptr::read_volatile(&raw const nic.dma[desc + 12]) };
+    if status & 0x01 == 0 {
+        return None;
+    }
+    let length = usize::from(u16::from_le_bytes([
+        unsafe { core::ptr::read_volatile(&raw const nic.dma[desc + 8]) },
+        unsafe { core::ptr::read_volatile(&raw const nic.dma[desc + 9]) },
+    ]));
+    let buf = E1000_RX_BUF_OFF + index * E1000_BUF_SIZE;
+    let copied = if length == 0 || length > E1000_BUF_SIZE {
+        0
+    } else {
+        let copied = length.min(out.len());
+        out[..copied].copy_from_slice(&nic.dma[buf..buf + copied]);
+        copied
+    };
+
+    // Clear DD (status byte at offset 12) and recycle the descriptor.
+    unsafe { core::ptr::write_volatile(&raw mut nic.dma[desc + 12], 0) };
+    // SAFETY: `mmio` is the adapter's MMIO BAR.
+    unsafe { mmio_write32(nic.mmio, E1000_RDT, index as u32) };
+    nic.rx_read = (index + 1) % E1000_RX_DESCS;
+    if copied == 0 { None } else { Some(copied) }
+}
+
 /// Transmits one Ethernet frame.
 fn transmit(frame: &[u8]) -> bool {
     let mut guard = NIC.lock();
     let Some(nic) = guard.as_mut() else {
         return false;
     };
+    match nic.kind {
+        NicKind::Rtl8139 => rtl8139_transmit(nic, frame),
+        NicKind::E1000 => e1000_transmit(nic, frame),
+    }
+}
+
+/// RTL8139 transmit path with its four round-robin TSD descriptors.
+fn rtl8139_transmit(nic: &mut Nic, frame: &[u8]) -> bool {
     if frame.is_empty() || frame.len() > TX_BUF {
         return false;
     }
@@ -323,6 +580,47 @@ fn transmit(frame: &[u8]) -> bool {
 
     // The chip transmits from its own round-robin descriptor on every TSD write,
     // so the host pointer advances whether or not the status poll saw TOK.
+    nic.tx_next += 1;
+    sent
+}
+
+/// E1000 transmit path: fill one descriptor, kick TDT, poll the DONE bit.
+fn e1000_transmit(nic: &mut Nic, frame: &[u8]) -> bool {
+    if frame.is_empty() || frame.len() > E1000_BUF_SIZE {
+        return false;
+    }
+    let index = nic.tx_next % E1000_TX_DESCS;
+    let desc = E1000_TX_DESC_OFF + index * E1000_DESC_SIZE;
+    let buf = E1000_TX_BUF_OFF + index * E1000_BUF_SIZE;
+    nic.dma[buf..buf + frame.len()].copy_from_slice(frame);
+    let address = physical(nic.dma[buf..].as_ptr(), nic.offset);
+
+    // Descriptor: address, length, checksum offset, command, status.
+    nic.dma[desc..desc + 4].copy_from_slice(&address.to_le_bytes());
+    nic.dma[desc + 4..desc + 8].fill(0);
+    nic.dma[desc + 8..desc + 10].copy_from_slice(&(frame.len() as u16).to_le_bytes());
+    nic.dma[desc + 10] = 0; // checksum offset
+    nic.dma[desc + 11] = 0x08 | 0x02 | 0x01; // EOP | SOF | EOF
+    nic.dma[desc + 12] = 0; // status: clear DONE
+    nic.dma[desc + 13] = 0; // checksum start
+    nic.dma[desc + 14..desc + 16].fill(0); // link
+
+    // Make the descriptor visible to the device before updating the tail.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    // SAFETY: `mmio` is the adapter's MMIO BAR.
+    unsafe { mmio_write32(nic.mmio, E1000_TDT, (index + 1) as u32) };
+
+    // SAFETY: the status byte is inside the DMA region and written by the NIC.
+    let status_ptr = unsafe { nic.dma.as_ptr().add(desc + 12) };
+    let mut sent = false;
+    for _ in 0..1_000_000 {
+        // SAFETY: as above.
+        let status = unsafe { core::ptr::read_volatile(status_ptr) };
+        if status & 0x01 != 0 {
+            sent = true;
+            break;
+        }
+    }
     nic.tx_next += 1;
     sent
 }
@@ -1323,6 +1621,21 @@ pub fn parse_url(input: &str) -> Option<Url> {
     })
 }
 
+/// Resolves a link target against the page the user is currently viewing.
+/// Fragment-only and empty targets are ignored because they do not load a new
+/// document.
+pub fn resolve_url(base: &str, location: &str) -> Option<String> {
+    let target = location.trim();
+    if target.is_empty() || target.starts_with('#') {
+        return None;
+    }
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("javascript:") || lower.starts_with("data:") {
+        return None;
+    }
+    Some(absolute_url(&parse_url(base)?, target))
+}
+
 /// Resolves a `Location` header against the URL that produced it.
 fn absolute_url(base: &Url, location: &str) -> String {
     let location = location.trim();
@@ -1354,6 +1667,61 @@ fn absolute_url(base: &Url, location: &str) -> String {
     )
 }
 
+/// Windows-1252 uses the C1 control range for printable punctuation. Mapping
+/// those bytes explicitly keeps characters such as smart quotes readable.
+fn windows_1252_char(byte: u8) -> char {
+    match byte {
+        0x80 => '\u{20ac}',
+        0x82 => '\u{201a}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201e}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02c6}',
+        0x89 => '\u{2030}',
+        0x8a => '\u{0160}',
+        0x8b => '\u{2039}',
+        0x8c => '\u{0152}',
+        0x8e => '\u{017d}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201c}',
+        0x94 => '\u{201d}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02dc}',
+        0x99 => '\u{2122}',
+        0x9a => '\u{0161}',
+        0x9b => '\u{203a}',
+        0x9c => '\u{0153}',
+        0x9e => '\u{017e}',
+        0x9f => '\u{0178}',
+        _ => char::from(byte),
+    }
+}
+
+fn decode_body(bytes: &[u8], content_type: Option<&str>) -> String {
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return text;
+    }
+    let declared = content_type.unwrap_or("").to_ascii_lowercase();
+    let single_byte = declared.is_empty()
+        || !declared.contains("charset=")
+        || declared.contains("iso-8859-1")
+        || declared.contains("iso_8859-1")
+        || declared.contains("latin-1")
+        || declared.contains("latin1")
+        || declared.contains("windows-1252")
+        || declared.contains("cp1252");
+    if single_byte {
+        bytes.iter().copied().map(windows_1252_char).collect()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 /// A fetched HTTP response with headers already decoded.
 pub struct Response {
     pub status: u16,
@@ -1364,8 +1732,12 @@ pub struct Response {
 }
 
 impl Response {
+    /// Decodes the body using the response's declared charset. Valid UTF-8 is
+    /// used as-is (many sites declare ISO-8859-1 but actually send UTF-8);
+    /// otherwise single-byte Latin-1/Windows-1252 bytes are mapped to their
+    /// Unicode equivalents instead of being replaced with U+FFFD.
     pub fn body_text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
+        decode_body(&self.body, self.header("content-type"))
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -1567,4 +1939,51 @@ pub fn parse_address(text: &str) -> Option<[u8; 4]> {
         count += 1;
     }
     (count == 4).then_some(octets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_body, resolve_url};
+
+    #[test_case]
+    fn valid_utf8_is_not_rewritten() {
+        assert_eq!(
+            decode_body(
+                "caf\u{e9}".as_bytes(),
+                Some("text/html; charset=iso-8859-1")
+            ),
+            "caf\u{e9}"
+        );
+    }
+
+    #[test_case]
+    fn latin1_bytes_use_the_declared_charset() {
+        assert_eq!(
+            decode_body(b"caf\xe9", Some("text/html; charset=ISO-8859-1")),
+            "caf\u{e9}"
+        );
+    }
+
+    #[test_case]
+    fn windows_1252_punctuation_is_printable() {
+        assert_eq!(
+            decode_body(b"\x93hello\x94", Some("text/html; charset=windows-1252")),
+            "\u{201c}hello\u{201d}"
+        );
+    }
+
+    #[test_case]
+    fn links_resolve_relative_to_the_current_page() {
+        let base = "https://www.google.com/search?q=rust";
+        assert_eq!(
+            resolve_url(base, "/url?q=https://example.com/").as_deref(),
+            Some("https://www.google.com/url?q=https://example.com/")
+        );
+        assert_eq!(
+            resolve_url(base, "https://example.com/x").as_deref(),
+            Some("https://example.com/x")
+        );
+        assert_eq!(resolve_url(base, "#top"), None);
+        assert_eq!(resolve_url(base, "javascript:alert(1)"), None);
+    }
 }

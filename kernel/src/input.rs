@@ -30,6 +30,8 @@ pub const KEY_END: u8 = 0x87;
 pub const KEY_WINDOWS: u8 = 0x88;
 /// F1 opens the Browser window from anywhere on the desktop.
 pub const KEY_BROWSER: u8 = 0x89;
+/// F2 opens the file manager from anywhere on the desktop.
+pub const KEY_FILES: u8 = 0x8a;
 
 /// Set by the COM1 interrupt the first time a serial byte arrives.
 ///

@@ -72,6 +72,8 @@ impl Default for SpanStyle {
 pub struct Span {
     pub text: String,
     pub style: SpanStyle,
+    /// Target of the enclosing `<a href>`, if this run is a link.
+    pub link: Option<String>,
 }
 
 /// Horizontal alignment of a line.
@@ -128,6 +130,7 @@ impl Line {
                 bold: true,
                 ..SpanStyle::default()
             },
+            link: None,
         });
         line
     }
@@ -177,6 +180,7 @@ impl Page {
             line.spans.push(Span {
                 text: (*text).to_string(),
                 style: SpanStyle::default(),
+                link: None,
             });
             page.lines.push(line);
         }
@@ -1383,6 +1387,8 @@ struct Flow {
     current: Line,
     used: usize,
     width: usize,
+    /// Href of the `<a>` currently being laid out, if any.
+    link: Option<String>,
 }
 
 impl Flow {
@@ -1392,7 +1398,15 @@ impl Flow {
             current: Line::new(LineKind::Normal),
             used: 0,
             width: width.max(8),
+            link: None,
         }
+    }
+
+    /// Lays out children with a new link target, then restores the old one.
+    fn with_link(&mut self, href: &str, children: impl FnOnce(&mut Self)) {
+        let old = self.link.replace(href.to_string());
+        children(self);
+        self.link = old;
     }
 
     fn flush(&mut self) {
@@ -1463,6 +1477,7 @@ impl Flow {
         self.current.spans.push(Span {
             text: text.to_string(),
             style: span_style,
+            link: self.link.clone(),
         });
     }
 
@@ -1524,6 +1539,13 @@ impl<'a> Engine<'a> {
         self.page
     }
 
+    /// Lays out every child of `id`, used for both inline and block boxes.
+    fn layout_children(&mut self, id: usize, decor: Option<BoxDecor>, flow: &mut Flow) {
+        for &child in self.dom.children(id) {
+            self.layout_node(child, decor, flow);
+        }
+    }
+
     fn drain_flow(&mut self, flow: &mut Flow) {
         for line in flow.lines.drain(..) {
             if self.page.lines.len() < 1200 {
@@ -1572,6 +1594,7 @@ impl<'a> Engine<'a> {
                 line.spans.push(Span {
                     text: alt,
                     style: SpanStyle::default(),
+                    link: flow.link.clone(),
                 });
                 flow.push_line(line);
                 return;
@@ -1587,6 +1610,7 @@ impl<'a> Engine<'a> {
                 line.spans.push(Span {
                     text: label,
                     style: SpanStyle::default(),
+                    link: flow.link.clone(),
                 });
                 flow.push_line(line);
                 return;
@@ -1594,10 +1618,19 @@ impl<'a> Engine<'a> {
             _ => {}
         }
 
+        // Anchor targets are attached to their text runs so the window manager
+        // can hit-test clicks and navigate. This only records the href; it does
+        // not fetch anything (no scripts, no CSS, no images are loaded).
+        let link_target = (tag == "a")
+            .then(|| self.dom.attr(id, "href").unwrap_or("").to_string())
+            .filter(|href| !href.is_empty());
+
         let block = matches!(style.display, Display::Block | Display::InlineBlock);
         if !block {
-            for &child in self.dom.children(id) {
-                self.layout_node(child, decor, flow);
+            if let Some(href) = link_target.as_deref() {
+                flow.with_link(href, |f| self.layout_children(id, decor, f));
+            } else {
+                self.layout_children(id, decor, flow);
             }
             return;
         }
@@ -1650,6 +1683,7 @@ impl<'a> Engine<'a> {
         };
 
         let mut child_flow = Flow::new(box_w);
+        child_flow.link = flow.link.clone();
         if let Some(marker) = index_marker {
             if !marker.is_empty() {
                 child_flow.push_text(&marker, &style);
@@ -1657,8 +1691,10 @@ impl<'a> Engine<'a> {
             }
         }
         let child_decor = box_decor.or(decor);
-        for &child in self.dom.children(id) {
-            self.layout_node(child, child_decor, &mut child_flow);
+        if let Some(href) = link_target.as_deref() {
+            child_flow.with_link(href, |f| self.layout_children(id, child_decor, f));
+        } else {
+            self.layout_children(id, child_decor, &mut child_flow);
         }
         child_flow.flush();
         if box_decor.is_some() && child_flow.lines.is_empty() {
@@ -1725,6 +1761,29 @@ mod tests {
         assert!(text.contains("body text"));
         assert!(!text.contains("Hi & bye"));
         assert!(!text.contains("color: red"));
+    }
+
+    #[test_case]
+    fn anchor_hrefs_are_attached_to_their_text_runs() {
+        let page = render(
+            "<p><a href=\"/next\">Next page</a> and <b>bold</b>.</p>",
+            40,
+        );
+        let spans: alloc::vec::Vec<&super::Span> = page
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .collect();
+        let link = spans
+            .iter()
+            .find(|span| span.text.contains("Next"))
+            .expect("link text was not rendered");
+        assert_eq!(link.link.as_deref(), Some("/next"));
+        let plain = spans
+            .iter()
+            .find(|span| span.text.contains("bold"))
+            .expect("bold text was not rendered");
+        assert_eq!(plain.link, None);
     }
 
     #[test_case]

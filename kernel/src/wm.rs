@@ -13,6 +13,7 @@ use crate::console::{self, Color};
 use bootloader_api::info::{BootInfo, FrameBufferInfo};
 
 use crate::browser;
+use crate::fm;
 use crate::input;
 use crate::mouse;
 
@@ -20,6 +21,13 @@ use crate::mouse;
 const BROWSER_LINE_H: usize = 11;
 /// Default address the Browser opens with.
 const BROWSER_HOME: &str = "http://example.com/";
+/// Width of the file manager's Quick Access sidebar.
+const FM_SIDEBAR_W: usize = 132;
+/// Height of one file row and of the sortable column header.
+const FM_ROW_H: usize = 18;
+const FM_HEADER_H: usize = 18;
+/// Height of the file manager's status bar.
+const FM_STATUS_H: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Colour palette (XP Luna blue theme)
@@ -138,6 +146,8 @@ pub enum WindowContent {
     Settings,
     CommandPrompt,
     Run,
+    /// A simple read-only viewer for text files opened from the file manager.
+    TextViewer,
     LogOff,
 }
 
@@ -146,16 +156,29 @@ impl WindowContent {
     const fn default_size(self) -> (usize, usize) {
         match self {
             WindowContent::Terminal => (480, 320),
-            WindowContent::RecycleBin | WindowContent::MyComputer => (440, 300),
+            WindowContent::RecycleBin => (440, 300),
+            WindowContent::MyComputer | WindowContent::MyDocuments => (760, 480),
             WindowContent::About => (400, 280),
-            WindowContent::MyDocuments => (460, 320),
             WindowContent::Browser => (900, 600),
             WindowContent::Settings => (420, 320),
             WindowContent::CommandPrompt => (480, 300),
             WindowContent::Run => (380, 190),
+            WindowContent::TextViewer => (560, 400),
             WindowContent::LogOff => (320, 170),
         }
     }
+}
+
+/// Hit-testable rectangles for the file manager window. Both drawing and click
+/// handling use this so a click always lands on the control the user sees.
+struct FmLayout {
+    sidebar: Rect,
+    buttons: [Rect; 4],
+    filter: Rect,
+    address: Rect,
+    headers: [Rect; 3],
+    rows: Rect,
+    status: Rect,
 }
 
 /// The desktop's independent UI state flags (`start_menu_open`, `mouse_down`,
@@ -190,13 +213,37 @@ pub struct Desktop {
     cp_input_len: usize,
     /// Browser window: the editable address, the last laid-out page, the
     /// scroll offset into it and a status line.
-    browser_url: [u8; 160],
+    browser_url: [u8; 512],
     browser_url_len: usize,
     browser_page: browser::Page,
     browser_scroll: usize,
     browser_status: alloc::string::String,
     /// Whether typing edits the address bar (as opposed to scrolling the page).
     browser_editing: bool,
+    /// Keyboard link navigation: ordinal of the focused link and the line that
+    /// contains it, so Tab/Enter work without a mouse.
+    browser_link_focus: Option<usize>,
+    browser_focus_line: Option<usize>,
+    /// File manager: unfiltered snapshot of the FAT16 root and the filtered,
+    /// sorted view drawn in the list. `fm_selected` indexes the view.
+    fm_all: Vec<fm::Item>,
+    fm_items: Vec<fm::Item>,
+    fm_selected: Option<usize>,
+    fm_scroll: usize,
+    fm_sort: fm::SortKey,
+    fm_sort_desc: bool,
+    fm_filter: [u8; 48],
+    fm_filter_len: usize,
+    fm_editing_filter: bool,
+    fm_status: alloc::string::String,
+    /// Text file viewer opened from the file manager.
+    fm_viewer: alloc::string::String,
+    fm_viewer_name: alloc::string::String,
+    fm_viewer_scroll: usize,
+    /// Row hit by the previous click. A second click on the already-selected
+    /// row opens it, which implements double-click without relying on a timer
+    /// (a slow render must not make the gesture fail).
+    fm_last_click_row: Option<usize>,
     /// The pixels underneath the pointer, captured from the back buffer when it
     /// is drawn so it can be erased without repainting the whole scene. `bpp`
     /// bytes per pixel, at most 4.
@@ -247,12 +294,28 @@ impl Desktop {
             cp_output: alloc::string::String::new(),
             cp_input: [0; 128],
             cp_input_len: 0,
-            browser_url: [0; 160],
+            browser_url: [0; 512],
             browser_url_len: 0,
             browser_page: browser::Page::default(),
             browser_scroll: 0,
             browser_status: alloc::string::String::new(),
             browser_editing: true,
+            browser_link_focus: None,
+            browser_focus_line: None,
+            fm_all: Vec::new(),
+            fm_items: Vec::new(),
+            fm_selected: None,
+            fm_scroll: 0,
+            fm_sort: fm::SortKey::Name,
+            fm_sort_desc: false,
+            fm_filter: [0; 48],
+            fm_filter_len: 0,
+            fm_editing_filter: true,
+            fm_status: alloc::string::String::from("Local Disk (C:\\) - FAT16 root directory."),
+            fm_viewer: alloc::string::String::new(),
+            fm_viewer_name: alloc::string::String::new(),
+            fm_viewer_scroll: 0,
+            fm_last_click_row: None,
             cursor_backup: [0; CURSOR_W * CURSOR_H * 4],
             cursor_saved: false,
             cursor_saved_x: 0,
@@ -415,6 +478,12 @@ impl Desktop {
             drag_offset_y: 0,
             content,
         })?;
+        if matches!(
+            content,
+            WindowContent::MyComputer | WindowContent::MyDocuments
+        ) {
+            self.fm_reload();
+        }
         if content == WindowContent::CommandPrompt {
             self.cp_output.clear();
             self.cp_output.push_str("GTos Command Prompt\n");
@@ -466,20 +535,174 @@ impl Desktop {
         self.browser_scroll = 0;
     }
 
+    /// Turns a space-separated address-bar entry into a web search. This gives
+    /// the browser a usable search workflow without JavaScript: Google's
+    /// `/search` results are ordinary static HTML with real links.
+    fn browser_search_url(query: &str) -> alloc::string::String {
+        use core::fmt::Write as _;
+
+        let mut url = alloc::string::String::from("https://www.google.com/search?q=");
+        for byte in query.bytes() {
+            match byte {
+                b' ' => url.push('+'),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    url.push(byte as char);
+                }
+                _ => {
+                    url.push('%');
+                    let _ = write!(url, "{byte:02X}");
+                }
+            }
+        }
+        url
+    }
+
+    /// Replaces a JavaScript-only page with an honest explanation. Modern app
+    /// shells (`YouTube`, for example) ship a multi-hundred-kilobyte `HTML` file
+    /// whose entire interface is created by scripts; our renderer deliberately
+    /// does not run them, so the raw document would look like an empty page.
+    fn browser_js_fallback(&mut self, body: &str, title: Option<&str>) -> bool {
+        let visible: usize = self
+            .browser_page
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.text.trim().len())
+            .sum();
+        if body.len() < 200_000 || !body.contains("<script") || visible >= 120 {
+            return false;
+        }
+        let mut owned = alloc::vec![
+            alloc::string::String::from("This page needs JavaScript."),
+            alloc::string::String::new(),
+            alloc::string::String::from(
+                "GTos does not run scripts, so the interface cannot be built."
+            ),
+        ];
+        if let Some(title) = title {
+            let short: alloc::string::String = title.chars().take(80).collect();
+            owned.push(alloc::format!("Site: {short}"));
+        }
+        owned.push(alloc::string::String::from(
+            "Try a text-oriented site, or search from the address bar.",
+        ));
+        let lines: alloc::vec::Vec<&str> =
+            owned.iter().map(alloc::string::String::as_str).collect();
+        let columns = self.browser_columns();
+        self.browser_page = browser::Page::from_text(&lines, columns);
+        self.browser_status = alloc::string::String::from("JavaScript required");
+        true
+    }
+
+    /// Finds the link under a click in the page viewport. Geometry mirrors the
+    /// paint code in `draw_browser`, so hit boxes always match what is on screen.
+    fn browser_link_at(&self, w: &Window, x: usize, y: usize) -> Option<alloc::string::String> {
+        let r = w.rect;
+        let cx = r.x + BORDER_WIDTH + 8;
+        let cy = r.y + TITLE_BAR_HEIGHT + 8;
+        let bar = Rect {
+            x: cx - 4,
+            y: cy - 4,
+            w: r.w.saturating_sub(2 * BORDER_WIDTH + 8),
+            h: 20,
+        };
+        let status_y = r.y + r.h - BORDER_WIDTH - 20;
+        let page_y = bar.y + bar.h + 4;
+        let page_rect = Rect {
+            x: r.x + BORDER_WIDTH,
+            y: page_y,
+            w: bar.w,
+            h: status_y.saturating_sub(page_y),
+        };
+        if x < page_rect.x
+            || x >= page_rect.x + page_rect.w
+            || y < page_rect.y
+            || y >= page_rect.y + page_rect.h
+        {
+            return None;
+        }
+        let text_left = page_rect.x + 6;
+        let text_w = page_rect.w.saturating_sub(10).saturating_sub(6);
+
+        let mut line_y = page_rect.y + 2;
+        for line in self.browser_page.lines.iter().skip(self.browser_scroll) {
+            let height = line.height();
+            if line_y + height > page_rect.y + page_rect.h {
+                break;
+            }
+            let mut lx = text_left + line.indent;
+            if let browser::LineKind::ListItem(depth) = line.kind {
+                lx += 4 * depth.min(3);
+            }
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| span.text.chars().count() * 8 * span.style.scale.max(1))
+                .sum();
+            if line.align == browser::Align::Center {
+                lx = text_left + text_w.saturating_sub(line_width) / 2;
+            } else if line.align == browser::Align::Right {
+                lx = text_left + text_w.saturating_sub(line_width);
+            }
+            for span in &line.spans {
+                let advance = span.text.chars().count() * 8 * span.style.scale.max(1);
+                if x >= lx && x < lx + advance && y >= line_y && y < line_y + height {
+                    if let Some(href) = &span.link {
+                        return crate::net::resolve_url(self.browser_url_str(), href);
+                    }
+                }
+                lx += advance;
+            }
+            line_y += height;
+        }
+        None
+    }
+
+    /// Returns the line index and href of the `ordinal`-th link on the page.
+    fn browser_nth_link(&self, ordinal: usize) -> Option<(usize, alloc::string::String)> {
+        let mut seen = 0usize;
+        for (index, line) in self.browser_page.lines.iter().enumerate() {
+            for span in &line.spans {
+                if let Some(href) = &span.link {
+                    if seen == ordinal {
+                        return Some((index, href.clone()));
+                    }
+                    seen += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn browser_link_count(&self) -> usize {
+        self.browser_page
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.link.is_some())
+            .count()
+    }
+
     /// Fetches the address in the bar and renders it into the window. The fetch
     /// is synchronous, so a "Loading..." page is drawn first.
     fn browser_navigate(&mut self) {
-        let url: alloc::string::String = self.browser_url_str().trim().into();
+        self.browser_link_focus = None;
+        self.browser_focus_line = None;
+        let mut url: alloc::string::String = self.browser_url_str().trim().into();
         if url.is_empty() {
             self.browser_status = alloc::string::String::from("Enter an address");
             return;
+        }
+        if url.contains(char::is_whitespace) && !url.to_ascii_lowercase().contains("://") {
+            url = Self::browser_search_url(&url);
+            self.set_browser_url(&url);
         }
 
         if !crate::net::is_up() {
             self.browser_status = alloc::string::String::from("No network adapter");
             self.browser_message(&[
-                "The RTL8139 adapter is not up.",
-                "Boot QEMU with -nic user,model=rtl8139.",
+                "No network adapter is up.",
+                "QEMU: -nic user,model=rtl8139; VirtualBox: Intel 82540EM.",
             ]);
             return;
         }
@@ -494,19 +717,24 @@ impl Desktop {
         match crate::net::fetch_url(&url) {
             Ok(mut response) => {
                 self.browser_status = core::mem::take(&mut response.status_line);
+                let final_url = response.final_url.clone();
                 let body = response.body_text();
+                let title = browser::title(&body);
                 let mut page = browser::render(&body, columns);
-                if let Some(title) = browser::title(&body) {
+                if let Some(title) = &title {
                     page.lines.insert(0, browser::Line::blank());
-                    page.lines.insert(0, browser::Line::heading(&title));
+                    page.lines.insert(0, browser::Line::heading(title));
                 }
                 if page.lines.is_empty() {
                     page = browser::Page::from_text(&["(the page had no readable text)"], columns);
                 }
                 self.browser_page = page;
+                // Show where redirects actually landed.
+                self.set_browser_url(&final_url);
+                self.browser_js_fallback(&body, title.as_deref());
             }
             Err(error) => {
-                self.browser_status = alloc::string::String::from("Request failed");
+                self.browser_status = alloc::format!("Error: {error}");
                 let mut messages = alloc::vec![
                     "Could not fetch the page.",
                     error.as_str(),
@@ -555,12 +783,45 @@ impl Desktop {
                 self.browser_scroll = self.browser_page.lines.len().saturating_sub(1);
                 true
             }
+            b'\t' => {
+                // Tab walks the links on the page; Enter follows the focused one.
+                let count = self.browser_link_count();
+                if count == 0 {
+                    return true;
+                }
+                let next = self
+                    .browser_link_focus
+                    .map_or(0, |value| (value + 1) % count);
+                if let Some((line, href)) = self.browser_nth_link(next) {
+                    self.browser_link_focus = Some(next);
+                    self.browser_focus_line = Some(line);
+                    self.browser_scroll = line.saturating_sub(2);
+                    self.browser_status = alloc::format!("Link: {href}");
+                    self.browser_editing = false;
+                }
+                true
+            }
             b'\n' | b'\r' => {
+                if !self.browser_editing {
+                    if let Some(ordinal) = self.browser_link_focus {
+                        if let Some((_, href)) = self.browser_nth_link(ordinal) {
+                            if let Some(target) =
+                                crate::net::resolve_url(self.browser_url_str(), &href)
+                            {
+                                self.set_browser_url(&target);
+                                self.browser_navigate();
+                                return true;
+                            }
+                        }
+                    }
+                }
                 self.browser_editing = true;
                 self.browser_navigate();
                 true
             }
             0x08 => {
+                self.browser_link_focus = None;
+                self.browser_focus_line = None;
                 if self.browser_editing && self.browser_url_len > 0 {
                     self.browser_url_len -= 1;
                     true
@@ -571,6 +832,8 @@ impl Desktop {
             0x20..=0x7e
                 if self.browser_editing && self.browser_url_len < self.browser_url.len() - 1 =>
             {
+                self.browser_link_focus = None;
+                self.browser_focus_line = None;
                 self.browser_url[self.browser_url_len] = byte;
                 self.browser_url_len += 1;
                 true
@@ -674,6 +937,408 @@ impl Desktop {
             }
             _ => false,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // File manager (My Computer / My Documents)
+    // -----------------------------------------------------------------------
+
+    /// Shared geometry for painting and hit-testing the file manager.
+    fn fm_layout(r: Rect) -> FmLayout {
+        let ix = r.x + BORDER_WIDTH;
+        let iy = r.y + TITLE_BAR_HEIGHT;
+        let iw = r.w.saturating_sub(2 * BORDER_WIDTH);
+        let ih = r.h.saturating_sub(TITLE_BAR_HEIGHT + BORDER_WIDTH);
+
+        let sidebar = Rect {
+            x: ix + 4,
+            y: iy + 4,
+            w: FM_SIDEBAR_W,
+            h: ih.saturating_sub(4 + FM_STATUS_H + 4),
+        };
+        let content_x = sidebar.x + sidebar.w + 6;
+        let content_w = ix + iw - 8 - content_x;
+
+        let button_y = iy + 5;
+        let widths = [64usize, 56, 56, 56];
+        let mut buttons = [Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; 4];
+        let mut x = content_x;
+        for (i, width) in widths.iter().enumerate() {
+            buttons[i] = Rect {
+                x,
+                y: button_y,
+                w: *width,
+                h: 18,
+            };
+            x += width + 4;
+        }
+        let filter = Rect {
+            x: x + 2,
+            y: button_y,
+            w: ix + iw - 8 - (x + 2),
+            h: 18,
+        };
+        let address = Rect {
+            x: content_x,
+            y: iy + 29,
+            w: content_w,
+            h: 18,
+        };
+        let header_y = iy + 53;
+        let headers = [
+            Rect {
+                x: content_x,
+                y: header_y,
+                w: 250,
+                h: FM_HEADER_H,
+            },
+            Rect {
+                x: content_x + 250,
+                y: header_y,
+                w: 76,
+                h: FM_HEADER_H,
+            },
+            Rect {
+                x: content_x + 326,
+                y: header_y,
+                w: content_w.saturating_sub(326),
+                h: FM_HEADER_H,
+            },
+        ];
+        let rows_y = header_y + FM_HEADER_H + 2;
+        let status_y = r.y + r.h - BORDER_WIDTH - FM_STATUS_H;
+        FmLayout {
+            sidebar,
+            buttons,
+            filter,
+            address,
+            headers,
+            rows: Rect {
+                x: content_x,
+                y: rows_y,
+                w: content_w,
+                h: status_y.saturating_sub(rows_y + 4),
+            },
+            status: Rect {
+                x: ix + 2,
+                y: status_y,
+                w: iw.saturating_sub(4),
+                h: FM_STATUS_H,
+            },
+        }
+    }
+
+    /// Number of rows currently visible in the active file manager window.
+    fn fm_visible_rows(&self) -> usize {
+        self.windows
+            .iter()
+            .flatten()
+            .find(|w| {
+                matches!(
+                    w.content,
+                    WindowContent::MyComputer | WindowContent::MyDocuments
+                )
+            })
+            .map_or(10, |w| Self::fm_layout(w.rect).rows.h / FM_ROW_H)
+    }
+
+    fn fm_filter_str(&self) -> &str {
+        core::str::from_utf8(&self.fm_filter[..self.fm_filter_len]).unwrap_or("")
+    }
+
+    /// Rebuilds the visible list from the FAT snapshot using the current filter
+    /// and sort settings, keeping the selection inside the list.
+    fn fm_refresh_view(&mut self) {
+        let filter = alloc::string::String::from(self.fm_filter_str());
+        self.fm_items = fm::view(&self.fm_all, &filter, self.fm_sort, self.fm_sort_desc);
+        // The row at a given index may now be a different file; a pending click
+        // must not open it on the next click.
+        self.fm_last_click_row = None;
+        if self.fm_items.is_empty() {
+            self.fm_selected = None;
+            self.fm_scroll = 0;
+        } else if let Some(selected) = self.fm_selected {
+            self.fm_selected = Some(selected.min(self.fm_items.len() - 1));
+        }
+    }
+
+    /// Re-reads the mounted FAT16 root directory and refreshes the view.
+    fn fm_reload(&mut self) {
+        self.fm_all = fm::snapshot();
+        self.fm_refresh_view();
+        let count = self.fm_all.len();
+        self.fm_status = alloc::format!(
+            "Local Disk (C:\\) - {} item{} in FAT16 root.",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+    }
+
+    fn fm_set_sort(&mut self, key: fm::SortKey) {
+        if self.fm_sort == key {
+            self.fm_sort_desc = !self.fm_sort_desc;
+        } else {
+            self.fm_sort = key;
+            self.fm_sort_desc = false;
+        }
+        self.fm_refresh_view();
+        let name = match key {
+            fm::SortKey::Name => "Name",
+            fm::SortKey::Size => "Size",
+            fm::SortKey::Type => "Type",
+        };
+        self.fm_status = alloc::format!(
+            "Sorted by {} ({}).",
+            name,
+            if self.fm_sort_desc {
+                "descending"
+            } else {
+                "ascending"
+            }
+        );
+    }
+
+    /// Opens the selected item. Text files get a viewer; folders and binaries
+    /// report an honest status message because this FAT16 driver is root-only.
+    fn fm_open(&mut self, index: usize) {
+        let Some(item) = self.fm_items.get(index).cloned() else {
+            return;
+        };
+        if item.is_dir {
+            self.fm_status = alloc::format!(
+                "{}: this FAT16 driver supports the root directory only.",
+                item.name
+            );
+            return;
+        }
+        let data = crate::fat::with_volume(|volume| volume.read(&item.name)).flatten();
+        let Some(bytes) = data else {
+            self.fm_status = alloc::format!("Could not read {}.", item.name);
+            return;
+        };
+        // The font covers printable ASCII only; replace other bytes with dots.
+        let mut text = alloc::string::String::new();
+        for byte in bytes.iter().take(16 * 1024) {
+            let printable =
+                (0x20..=0x7e).contains(byte) || *byte == b'\n' || *byte == b'\r' || *byte == b'\t';
+            text.push(if printable { *byte as char } else { '.' });
+        }
+        self.fm_viewer = text.chars().filter(|c| *c != '\r').collect();
+        self.fm_viewer_name.clone_from(&item.name);
+        self.fm_viewer_scroll = 0;
+        self.fm_status = alloc::format!("Opened {}.", item.name);
+        self.spawn_window("Text Viewer", WindowContent::TextViewer);
+    }
+
+    /// Moves the selection by `delta` rows, keeping it inside the viewport.
+    fn fm_move_selection(&mut self, delta: isize) {
+        if self.fm_items.is_empty() {
+            return;
+        }
+        let current = self.fm_selected.unwrap_or(0) as isize;
+        let last = self.fm_items.len() - 1;
+        let next = (current + delta).clamp(0, last as isize) as usize;
+        self.fm_selected = Some(next);
+        self.fm_last_click_row = None;
+        let rows = self.fm_visible_rows().max(1);
+        if next < self.fm_scroll {
+            self.fm_scroll = next;
+        } else if next >= self.fm_scroll + rows {
+            self.fm_scroll = next + 1 - rows;
+        }
+    }
+
+    /// Handles one byte while the file manager has keyboard focus.
+    fn fm_key(&mut self, byte: u8) -> bool {
+        let rows = self.fm_visible_rows().max(1);
+        match byte {
+            input::KEY_UP => {
+                self.fm_move_selection(-1);
+                true
+            }
+            input::KEY_DOWN => {
+                self.fm_move_selection(1);
+                true
+            }
+            input::KEY_PAGE_UP => {
+                self.fm_move_selection(-(rows as isize));
+                true
+            }
+            input::KEY_PAGE_DOWN => {
+                self.fm_move_selection(rows as isize);
+                true
+            }
+            input::KEY_HOME => {
+                let count = self.fm_items.len();
+                if count > 0 {
+                    self.fm_selected = Some(0);
+                    self.fm_last_click_row = None;
+                    self.fm_scroll = 0;
+                }
+                true
+            }
+            input::KEY_END => {
+                let count = self.fm_items.len();
+                if count > 0 {
+                    self.fm_selected = Some(count - 1);
+                    self.fm_last_click_row = None;
+                    self.fm_scroll = count.saturating_sub(rows);
+                }
+                true
+            }
+            b'\n' | b'\r' => {
+                if let Some(index) = self.fm_selected {
+                    self.fm_open(index);
+                }
+                true
+            }
+            0x08 => {
+                if self.fm_filter_len > 0 {
+                    self.fm_filter_len -= 1;
+                    self.fm_refresh_view();
+                }
+                true
+            }
+            0x1b => {
+                self.fm_filter_len = 0;
+                self.fm_refresh_view();
+                self.fm_status = alloc::string::String::from("Search cleared.");
+                true
+            }
+            0x20..=0x7e if self.fm_filter_len + 1 < self.fm_filter.len() => {
+                self.fm_filter[self.fm_filter_len] = byte;
+                self.fm_filter_len += 1;
+                self.fm_refresh_view();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handles one byte while the text file viewer has keyboard focus.
+    fn fm_viewer_key(&mut self, byte: u8) -> bool {
+        let last = self.fm_viewer.lines().count().saturating_sub(1);
+        let page = self
+            .windows
+            .iter()
+            .flatten()
+            .find(|w| w.content == WindowContent::TextViewer)
+            .map_or(10, |w| {
+                w.rect
+                    .h
+                    .saturating_sub(TITLE_BAR_HEIGHT + BORDER_WIDTH + 42)
+                    / 11
+            })
+            .max(1);
+        match byte {
+            input::KEY_UP => {
+                self.fm_viewer_scroll = self.fm_viewer_scroll.saturating_sub(1);
+            }
+            input::KEY_DOWN => {
+                self.fm_viewer_scroll = (self.fm_viewer_scroll + 1).min(last);
+            }
+            input::KEY_PAGE_UP => {
+                self.fm_viewer_scroll = self.fm_viewer_scroll.saturating_sub(page);
+            }
+            input::KEY_PAGE_DOWN => {
+                self.fm_viewer_scroll = (self.fm_viewer_scroll + page).min(last);
+            }
+            input::KEY_HOME => self.fm_viewer_scroll = 0,
+            input::KEY_END => self.fm_viewer_scroll = last,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Handles a click inside a file manager window. Returns `true` when the
+    /// click was consumed (so the generic title-bar drag is skipped).
+    fn fm_click(&mut self, index: usize, r: Rect, x: usize, y: usize) -> bool {
+        let l = Self::fm_layout(r);
+        let inside =
+            |rect: Rect| x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+
+        if inside(l.filter) {
+            self.fm_editing_filter = true;
+            self.activate(index);
+            return true;
+        }
+        for (i, button) in l.buttons.iter().enumerate() {
+            if inside(*button) {
+                match i {
+                    0 => self.fm_reload(),
+                    1 => self.fm_set_sort(fm::SortKey::Name),
+                    2 => self.fm_set_sort(fm::SortKey::Size),
+                    _ => self.fm_set_sort(fm::SortKey::Type),
+                }
+                self.activate(index);
+                return true;
+            }
+        }
+        for (i, header) in l.headers.iter().enumerate() {
+            if inside(*header) {
+                match i {
+                    0 => self.fm_set_sort(fm::SortKey::Name),
+                    1 => self.fm_set_sort(fm::SortKey::Size),
+                    _ => self.fm_set_sort(fm::SortKey::Type),
+                }
+                self.activate(index);
+                return true;
+            }
+        }
+        if inside(l.address) {
+            self.fm_status = alloc::string::String::from(
+                "C:\\ is the FAT16 root; subfolders are not supported.",
+            );
+            self.activate(index);
+            return true;
+        }
+        // Quick Access entries.
+        if inside(l.sidebar) {
+            let sx = l.sidebar.x + 20;
+            let sy = l.sidebar.y + 28;
+            if x >= sx && x < sx + 112 && y >= sy && y < sy + 14 {
+                self.fm_reload();
+                self.activate(index);
+                return true;
+            }
+            if x >= sx && x < sx + 112 && y >= sy + 26 && y < sy + 40 {
+                self.fm_status = alloc::string::String::from("Floppy Disk (A:\\) is not mounted.");
+                self.activate(index);
+                return true;
+            }
+            return false;
+        }
+        if inside(l.rows) && y >= l.rows.y {
+            let row = (y - l.rows.y) / FM_ROW_H + self.fm_scroll;
+            if row < self.fm_items.len() {
+                // A repeated click on the already-selected row opens the item.
+                // This is the double-click gesture, but it does not depend on a
+                // timing window: a slow render or a brief pause between the two
+                // clicks must never make opening fail.
+                let repeat = self.fm_last_click_row == Some(row) && self.fm_selected == Some(row);
+                // Activate before opening so a newly spawned text viewer ends up
+                // on top instead of being covered by the file manager.
+                self.activate(index);
+                if repeat {
+                    self.fm_open(row);
+                    self.fm_last_click_row = None;
+                } else {
+                    self.fm_selected = Some(row);
+                    self.fm_last_click_row = Some(row);
+                }
+                return true;
+            }
+        }
+        if inside(l.status) {
+            self.activate(index);
+            return true;
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -1190,6 +1855,262 @@ impl Desktop {
         }
     }
 
+    /// Small folder/file icon used by the file manager rows and sidebar.
+    fn fm_icon(&self, x: usize, y: usize, is_dir: bool) {
+        if is_dir {
+            self.fill_rect_xy(x, y + 2, 12, 8, Color(0xE8_B8_25));
+            self.fill_rect_xy(x, y, 6, 3, Color(0xC8_90_10));
+            self.draw_rect_border(
+                Rect {
+                    x,
+                    y: y + 2,
+                    w: 12,
+                    h: 8,
+                },
+                Color(0x80_60_00),
+                1,
+            );
+        } else {
+            self.fill_rect_xy(x + 1, y, 9, 11, Color(0xFF_FF_FF));
+            self.draw_rect_border(
+                Rect {
+                    x: x + 1,
+                    y,
+                    w: 9,
+                    h: 11,
+                },
+                Color(0x70_70_70),
+                1,
+            );
+            for (i, width) in [5usize, 5, 3].iter().enumerate() {
+                self.fill_rect_xy(x + 3, y + 3 + i * 2, *width, 1, Color(0x40_80_C0));
+            }
+        }
+    }
+
+    fn fm_button(&self, rect: Rect, label: &str, active: bool) {
+        self.fill_rect(
+            rect,
+            if active {
+                Color(0xD6_E4_F7)
+            } else {
+                Color(0xEF_EF_EF)
+            },
+        );
+        self.draw_rect_border(rect, Color(0x70_90_C0), 1);
+        self.draw_text(rect.x + 5, rect.y + 5, label, COL_TEXT, 1);
+    }
+
+    /// Paints the file manager: sidebar, toolbar, address bar, sortable column
+    /// headers, scrollable file rows and a status bar.
+    #[allow(clippy::too_many_lines)]
+    fn draw_file_manager(&self, w: &Window) {
+        let r = w.rect;
+        let l = Self::fm_layout(r);
+
+        // Quick Access sidebar.
+        self.fill_rect(l.sidebar, Color(0xF3_F7_FD));
+        self.draw_rect_border(l.sidebar, Color(0x9F_B6_D9), 1);
+        let sx = l.sidebar.x + 8;
+        self.draw_text(sx, l.sidebar.y + 8, "Quick Access", Color(0x12_45_85), 1);
+        self.hline(
+            sx,
+            l.sidebar.y + 22,
+            l.sidebar.w.saturating_sub(16),
+            Color(0xC8_D8_EC),
+        );
+        self.fm_icon(sx, l.sidebar.y + 30, true);
+        self.draw_text(sx + 16, l.sidebar.y + 33, "Local Disk (C:)", COL_TEXT, 1);
+        self.fm_icon(sx, l.sidebar.y + 56, false);
+        self.draw_text(sx + 16, l.sidebar.y + 59, "Floppy Disk (A:)", COL_TEXT, 1);
+        self.draw_text(sx, l.sidebar.y + 96, "System", Color(0x12_45_85), 1);
+        self.hline(
+            sx,
+            l.sidebar.y + 110,
+            l.sidebar.w.saturating_sub(16),
+            Color(0xC8_D8_EC),
+        );
+        self.draw_text(sx, l.sidebar.y + 118, "GTos 0.1.0", COL_TEXT, 1);
+        self.draw_text(sx, l.sidebar.y + 134, "FAT16 data disk", COL_TEXT, 1);
+        self.draw_text(sx, l.sidebar.y + 150, "Kernel: ring 0", COL_TEXT, 1);
+
+        // Toolbar: refresh plus the three sort buttons.
+        let labels = ["Refresh", "Name", "Size", "Type"];
+        for i in 0..4 {
+            let active = match i {
+                1 => self.fm_sort == fm::SortKey::Name,
+                2 => self.fm_sort == fm::SortKey::Size,
+                3 => self.fm_sort == fm::SortKey::Type,
+                _ => false,
+            };
+            self.fm_button(l.buttons[i], labels[i], active);
+        }
+
+        // Search field. Typing narrows the list as in Sigma's smart search.
+        self.fill_rect(l.filter, Color(0xFF_FF_FF));
+        self.draw_rect_border(
+            l.filter,
+            if self.fm_editing_filter {
+                Color(0x00_78_D7)
+            } else {
+                Color(0x9A_9A_9A)
+            },
+            1,
+        );
+        let filter = self.fm_filter_str();
+        if filter.is_empty() {
+            self.draw_text(
+                l.filter.x + 5,
+                l.filter.y + 5,
+                "Search files...",
+                Color(0x90_90_90),
+                1,
+            );
+        } else {
+            self.draw_text(l.filter.x + 5, l.filter.y + 5, filter, COL_TEXT, 1);
+        }
+
+        // Address bar.
+        self.fill_rect(l.address, Color(0xFF_FF_FF));
+        self.draw_rect_border(l.address, Color(0x9F_B6_D9), 1);
+        self.draw_text(
+            l.address.x + 5,
+            l.address.y + 5,
+            "Address",
+            Color(0x60_60_60),
+            1,
+        );
+        self.draw_text(
+            l.address.x + 64,
+            l.address.y + 5,
+            "C:\\",
+            Color(0x00_50_A0),
+            1,
+        );
+        self.draw_text(
+            l.address.x + 100,
+            l.address.y + 5,
+            "Local Disk (FAT16 root)",
+            COL_TEXT,
+            1,
+        );
+
+        // Sortable column headers.
+        let header_labels = ["Name", "Size", "Type"];
+        let header_keys = [fm::SortKey::Name, fm::SortKey::Size, fm::SortKey::Type];
+        for (i, header) in l.headers.iter().enumerate() {
+            self.fill_rect(*header, Color(0xE8_EF_F9));
+            self.draw_text(
+                header.x + 6,
+                header.y + 4,
+                header_labels[i],
+                Color(0x10_40_80),
+                1,
+            );
+            if self.fm_sort == header_keys[i] {
+                let arrow = if self.fm_sort_desc { "v" } else { "^" };
+                self.draw_text(
+                    header.x + header.w.saturating_sub(14),
+                    header.y + 4,
+                    arrow,
+                    Color(0x10_40_80),
+                    1,
+                );
+            }
+        }
+        self.hline(
+            l.headers[0].x,
+            l.headers[0].y + FM_HEADER_H - 1,
+            l.rows.w,
+            Color(0x80_98_BC),
+        );
+
+        // File rows.
+        let visible = l.rows.h / FM_ROW_H;
+        let name_x = l.rows.x + 20;
+        let size_x = l.rows.x + 250;
+        let type_x = l.rows.x + 326;
+        let name_chars = size_x.saturating_sub(name_x + 8) / 8;
+        for row in 0..visible {
+            let index = self.fm_scroll + row;
+            let Some(item) = self.fm_items.get(index) else {
+                break;
+            };
+            let y = l.rows.y + row * FM_ROW_H;
+            let selected = self.fm_selected == Some(index);
+            if selected {
+                self.fill_rect_xy(l.rows.x, y, l.rows.w, FM_ROW_H, Color(0x31_6A_C6));
+            } else if row % 2 == 1 {
+                self.fill_rect_xy(l.rows.x, y, l.rows.w, FM_ROW_H, Color(0xF5_F8_FC));
+            }
+            let text_color = if selected { COL_TEXT_WHITE } else { COL_TEXT };
+            self.fm_icon(l.rows.x + 4, y + 4, item.is_dir);
+            let name: alloc::string::String = item.name.chars().take(name_chars).collect();
+            self.draw_text(name_x, y + 5, &name, text_color, 1);
+            self.draw_text(size_x, y + 5, &item.size_text(), text_color, 1);
+            self.draw_text(type_x, y + 5, item.kind(), text_color, 1);
+        }
+        if self.fm_items.is_empty() {
+            let message = if self.fm_all.is_empty() {
+                "No FAT16 data disk is mounted."
+            } else {
+                "No files match the search."
+            };
+            self.draw_text(l.rows.x + 12, l.rows.y + 12, message, Color(0x80_80_80), 1);
+        }
+        if self.fm_items.len() > visible {
+            let sb_x = l.rows.x + l.rows.w.saturating_sub(6);
+            self.fill_rect_xy(sb_x, l.rows.y, 6, l.rows.h, Color(0xEC_EC_EC));
+            let thumb_h = (l.rows.h * visible / self.fm_items.len()).max(8);
+            let travel = l.rows.h.saturating_sub(thumb_h);
+            let thumb_y =
+                l.rows.y + self.fm_scroll * travel / (self.fm_items.len() - visible).max(1);
+            self.fill_rect_xy(sb_x, thumb_y, 6, thumb_h, Color(0x8E_A8_C8));
+        }
+
+        // Status bar.
+        self.fill_rect(l.status, Color(0xF0_F0_F0));
+        self.draw_rect_border(l.status, Color(0xA0_B0_C8), 1);
+        let mut status = self.fm_status.clone();
+        if let Some(index) = self.fm_selected {
+            if let Some(item) = self.fm_items.get(index) {
+                status.push_str("  |  Selected: ");
+                status.push_str(&item.name);
+            }
+        }
+        let chars = l.status.w.saturating_sub(12) / 8;
+        let shown: alloc::string::String = status.chars().take(chars).collect();
+        self.draw_text(l.status.x + 6, l.status.y + 5, &shown, Color(0x20_40_70), 1);
+    }
+
+    /// Paints a text file opened from the file manager.
+    fn draw_text_viewer(&self, w: &Window) {
+        let r = w.rect;
+        let cx = r.x + BORDER_WIDTH + 8;
+        let cy = r.y + TITLE_BAR_HEIGHT + 8;
+        let title = alloc::format!("{} - Text Viewer", self.fm_viewer_name);
+        self.draw_text(cx, cy, &title, COL_TEXT, 1);
+        let width = r.w.saturating_sub(2 * BORDER_WIDTH + 16);
+        self.hline(cx, cy + 14, width, Color(0xA0_B0_C8));
+        let y0 = cy + 26;
+        let max_lines =
+            r.y.saturating_add(r.h)
+                .saturating_sub(BORDER_WIDTH + 8)
+                .saturating_sub(y0)
+                / 11;
+        let chars = width / 8;
+        for (i, line) in self
+            .fm_viewer
+            .lines()
+            .skip(self.fm_viewer_scroll)
+            .take(max_lines)
+            .enumerate()
+        {
+            let shown: alloc::string::String = line.chars().take(chars).collect();
+            self.draw_text(cx, y0 + i * 11, &shown, COL_TEXT, 1);
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         clippy::many_single_char_names,
@@ -1241,14 +2162,14 @@ impl Desktop {
                 self.draw_text(
                     cx,
                     cy + 112,
-                    "GTos has no writable filesystem,",
+                    "These entries are placeholders: the FAT16",
                     COL_TEXT,
                     1,
                 );
                 self.draw_text(
                     cx,
                     cy + 124,
-                    "so these entries are placeholders.",
+                    "volume has no recycle bin facility.",
                     COL_TEXT,
                     1,
                 );
@@ -1259,34 +2180,11 @@ impl Desktop {
                 self.draw_text(cx, cy + 32, "written in Rust.", COL_TEXT, 1);
                 self.draw_text(cx, cy + 48, "No Linux. No std. No libc.", COL_TEXT, 1);
             }
-            WindowContent::MyComputer => {
-                self.draw_text(cx, cy, "My Computer", COL_TEXT, 1);
-                self.draw_text(cx, cy + 24, "Local Disk (C:)   32 MiB", COL_TEXT, 1);
-                self.draw_text(cx, cy + 40, "Floppy Disk (A:)  none", COL_TEXT, 1);
-                self.draw_text(cx, cy + 64, "System: GTos 0.1.0", COL_TEXT, 1);
-                self.draw_text(cx, cy + 80, "Heap: 32 MiB, ring 0", COL_TEXT, 1);
+            WindowContent::MyComputer | WindowContent::MyDocuments => {
+                self.draw_file_manager(w);
             }
-            WindowContent::MyDocuments => {
-                self.draw_text(cx, cy, "My Documents", COL_TEXT, 1);
-                self.draw_text(cx, cy + 20, "Name              Size    Type", COL_TEXT, 1);
-                self.draw_text(
-                    cx,
-                    cy + 32,
-                    "----------------  ------  --------",
-                    COL_TEXT,
-                    1,
-                );
-                self.draw_text(cx, cy + 44, "readme.txt        1 KB    Text", COL_TEXT, 1);
-                self.draw_text(
-                    cx,
-                    cy + 56,
-                    "notes.md          2 KB    Markdown",
-                    COL_TEXT,
-                    1,
-                );
-                self.draw_text(cx, cy + 68, "gtos.log        4 KB    Log", COL_TEXT, 1);
-                self.draw_text(cx, cy + 80, "config.toml       1 KB    TOML", COL_TEXT, 1);
-                self.draw_text(cx, cy + 100, "4 files, 8 KB total", COL_TEXT, 1);
+            WindowContent::TextViewer => {
+                self.draw_text_viewer(w);
             }
             WindowContent::Browser => {
                 // Toolbar: address field and Go button.
@@ -1397,10 +2295,13 @@ impl Desktop {
                 }
 
                 let mut y = page_rect.y + 2;
-                for line in page.lines.iter().skip(self.browser_scroll) {
+                for (line_index, line) in page.lines.iter().enumerate().skip(self.browser_scroll) {
                     let height = line.height();
                     if y + height > page_rect.y + page_rect.h {
                         break;
+                    }
+                    if Some(line_index) == self.browser_focus_line {
+                        self.fill_rect_xy(page_rect.x + 2, y, text_w, height, Color(0xD9_E8_FF));
                     }
                     if let Some(decor) = line.decor {
                         let dx = page_rect.x + 2 + decor.x;
@@ -2029,6 +2930,16 @@ impl Desktop {
                 return;
             }
 
+            // File manager: toolbar buttons, search field, column headers,
+            // Quick Access entries and file rows (including double-click).
+            if matches!(
+                w.content,
+                WindowContent::MyComputer | WindowContent::MyDocuments
+            ) && self.fm_click(i, r, x, y)
+            {
+                return;
+            }
+
             // Run dialog: clicking OK or Cancel closes the window.
             if w.content == WindowContent::Run {
                 let cx = r.x + BORDER_WIDTH + 8;
@@ -2088,6 +2999,12 @@ impl Desktop {
                 if x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h {
                     self.activate(i);
                     self.browser_editing = true;
+                    return;
+                }
+                if let Some(target) = self.browser_link_at(&w, x, y) {
+                    self.activate(i);
+                    self.set_browser_url(&target);
+                    self.browser_navigate();
                     return;
                 }
                 self.browser_editing = false;
@@ -2262,6 +3179,11 @@ pub fn run() {
                     changed = true;
                     continue;
                 }
+                if byte == input::KEY_FILES {
+                    d.spawn_window("My Computer", WindowContent::MyComputer);
+                    changed = true;
+                    continue;
+                }
                 if byte == input::KEY_WINDOWS {
                     // The Windows key opens (or closes) the Start menu even
                     // when a window has keyboard focus, just like Windows XP.
@@ -2272,6 +3194,8 @@ pub fn run() {
                 changed |= match active {
                     Some(WindowContent::CommandPrompt) => d.cp_key(byte),
                     Some(WindowContent::Browser) => d.browser_key(byte),
+                    Some(WindowContent::MyComputer | WindowContent::MyDocuments) => d.fm_key(byte),
+                    Some(WindowContent::TextViewer) => d.fm_viewer_key(byte),
                     _ => false,
                 };
             }

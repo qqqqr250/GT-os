@@ -74,8 +74,9 @@ pub fn handle_scancode(scancode: u8) {
                 CAPS_LOCK.fetch_xor(true, Ordering::Relaxed);
             }
         }
-        // F1 is a desktop shortcut for opening the Browser window.
+        // F1 opens the Browser, F2 opens the file manager.
         0x3b if !released => input::push(input::KEY_BROWSER),
+        0x3c if !released => input::push(input::KEY_FILES),
         _ if !released => {
             let Some(&normal) = NORMAL.get(code as usize) else {
                 return;
@@ -141,6 +142,17 @@ mod tests {
         assert_eq!(input::pop(), None);
 
         handle_scancode(0xbb); // F1 break
+        assert_eq!(input::pop(), None);
+    }
+
+    #[test_case]
+    fn f2_opens_the_file_manager_and_release_does_not_queue_again() {
+        drain_input();
+        handle_scancode(0x3c); // F2 make
+        assert_eq!(input::pop(), Some(input::KEY_FILES));
+        assert_eq!(input::pop(), None);
+
+        handle_scancode(0xbc); // F2 break
         assert_eq!(input::pop(), None);
     }
 }
