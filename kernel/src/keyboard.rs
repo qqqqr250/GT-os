@@ -53,6 +53,9 @@ pub fn handle_scancode(scancode: u8) {
             0x51 => Some(input::KEY_PAGE_DOWN),
             0x47 => Some(input::KEY_HOME),
             0x4f => Some(input::KEY_END),
+            // Left/right Windows (GUI) keys. The desktop uses this to toggle
+            // the Start menu; the shell ignores the control code.
+            0x5b | 0x5c => Some(input::KEY_WINDOWS),
             _ => None,
         };
         if let Some(key) = key {
@@ -89,5 +92,42 @@ pub fn handle_scancode(scancode: u8) {
             input::push(ascii);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_scancode;
+    use crate::input;
+
+    fn drain_input() {
+        while input::pop().is_some() {}
+    }
+
+    #[test_case]
+    fn left_windows_key_toggles_the_desktop_start_menu() {
+        drain_input();
+        handle_scancode(0xe0);
+        handle_scancode(0x5b); // left Windows make
+        assert_eq!(input::pop(), Some(input::KEY_WINDOWS));
+        assert_eq!(input::pop(), None);
+
+        // Releasing the key must not queue a second toggle.
+        handle_scancode(0xe0);
+        handle_scancode(0xdb); // left Windows break
+        assert_eq!(input::pop(), None);
+    }
+
+    #[test_case]
+    fn right_windows_key_toggles_the_desktop_start_menu() {
+        drain_input();
+        handle_scancode(0xe0);
+        handle_scancode(0x5c); // right Windows make
+        assert_eq!(input::pop(), Some(input::KEY_WINDOWS));
+        assert_eq!(input::pop(), None);
+
+        handle_scancode(0xe0);
+        handle_scancode(0xdc); // right Windows break
+        assert_eq!(input::pop(), None);
     }
 }

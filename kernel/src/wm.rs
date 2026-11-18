@@ -2056,6 +2056,13 @@ pub fn run() {
                 .map(|w| w.content);
             let mut changed = false;
             while let Some(byte) = input::pop() {
+                if byte == input::KEY_WINDOWS {
+                    // The Windows key opens (or closes) the Start menu even
+                    // when a window has keyboard focus, just like Windows XP.
+                    d.start_menu_open = !d.start_menu_open;
+                    changed = true;
+                    continue;
+                }
                 changed |= match active {
                     Some(WindowContent::CommandPrompt) => d.cp_key(byte),
                     Some(WindowContent::Browser) => d.browser_key(byte),
