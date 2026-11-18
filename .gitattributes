@@ -1,5 +1,5 @@
 # RustOS is a Rust project. Keep GitHub's language bar at 100% Rust by keeping
 # the helper tooling out of linguist's statistics: the PowerShell scripts under
 # scripts\ and the public-domain font data header under tools\.
-*.ps1 -linguist-detectable
-*.h   -linguist-detectable
+*.ps1 -linguist-detectable linguist-vendored
+*.h   -linguist-detectable linguist-vendored
