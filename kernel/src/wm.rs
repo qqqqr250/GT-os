@@ -129,6 +129,7 @@ pub struct Window {
 #[derive(Clone, Copy, PartialEq)]
 pub enum WindowContent {
     Terminal,
+    RecycleBin,
     About,
     MyComputer,
     MyDocuments,
@@ -144,8 +145,8 @@ impl WindowContent {
     const fn default_size(self) -> (usize, usize) {
         match self {
             WindowContent::Terminal => (480, 320),
+            WindowContent::RecycleBin | WindowContent::MyComputer => (440, 300),
             WindowContent::About => (400, 280),
-            WindowContent::MyComputer => (440, 300),
             WindowContent::MyDocuments => (460, 320),
             WindowContent::Browser => (520, 360),
             WindowContent::ControlPanel => (420, 320),
@@ -1057,6 +1058,7 @@ impl Desktop {
             (20usize, 100usize, "My Documents", Color(0xFF_D7_00)),
             (20usize, 180usize, "Browser", Color(0x00_00_FF)),
             (20usize, 260usize, "Terminal", Color(0x80_80_80)),
+            (20usize, 340usize, "Recycle Bin", Color(0x4A_90_D9)),
         ];
         for (ix, iy, label, color) in icons {
             // Icon (simple colored square with border).
@@ -1149,6 +1151,53 @@ impl Desktop {
                 self.draw_text(cx, cy + 16, "rustos> help", COL_TEXT, 1);
                 self.draw_text(cx, cy + 32, "Type 'help' for commands.", COL_TEXT, 1);
                 self.draw_text(cx, cy + 48, "Kernel running in ring 0.", COL_TEXT, 1);
+            }
+            WindowContent::RecycleBin => {
+                self.draw_text(cx, cy, "Recycle Bin", COL_TEXT, 1);
+                self.draw_text(cx, cy + 20, "Name             Type    Deleted", COL_TEXT, 1);
+                self.draw_text(
+                    cx,
+                    cy + 32,
+                    "---------------  ------  ---------",
+                    COL_TEXT,
+                    1,
+                );
+                self.draw_text(
+                    cx,
+                    cy + 44,
+                    "old_kernel.bin   Binary  yesterday",
+                    COL_TEXT,
+                    1,
+                );
+                self.draw_text(
+                    cx,
+                    cy + 56,
+                    "panic.log        Log     yesterday",
+                    COL_TEXT,
+                    1,
+                );
+                self.draw_text(
+                    cx,
+                    cy + 68,
+                    "notes.txt        Text    2 days ago",
+                    COL_TEXT,
+                    1,
+                );
+                self.draw_text(cx, cy + 92, "3 items, 5 KB", COL_TEXT, 1);
+                self.draw_text(
+                    cx,
+                    cy + 112,
+                    "RustOS has no writable filesystem,",
+                    COL_TEXT,
+                    1,
+                );
+                self.draw_text(
+                    cx,
+                    cy + 124,
+                    "so these entries are placeholders.",
+                    COL_TEXT,
+                    1,
+                );
             }
             WindowContent::About => {
                 self.draw_text(cx, cy, "RustOS 0.1.0", COL_TEXT, 1);
@@ -1859,11 +1908,12 @@ impl Desktop {
 
         // Desktop icons. Checked after the windows because windows are drawn on
         // top of the icons.
-        let icons: [(usize, usize, &str, WindowContent); 4] = [
+        let icons: [(usize, usize, &str, WindowContent); 5] = [
             (20, 20, "My Computer", WindowContent::MyComputer),
             (20, 100, "My Documents", WindowContent::MyDocuments),
             (20, 180, "Browser", WindowContent::Browser),
             (20, 260, "Terminal", WindowContent::Terminal),
+            (20, 340, "Recycle Bin", WindowContent::RecycleBin),
         ];
         for (ix, iy, _label, content) in icons {
             if x >= ix && x < ix + 32 && y >= iy && y < iy + 48 {
@@ -1872,6 +1922,7 @@ impl Desktop {
                         WindowContent::MyComputer => "My Computer",
                         WindowContent::MyDocuments => "My Documents",
                         WindowContent::Browser => "Browser",
+                        WindowContent::RecycleBin => "Recycle Bin",
                         _ => "Terminal",
                     },
                     content,
