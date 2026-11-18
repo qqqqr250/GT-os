@@ -679,7 +679,7 @@ fn http(rest: &str) {
     let rest = rest.trim();
     if rest.is_empty() {
         console::set_fg(console::RED);
-        println!("usage: http <url>   e.g. http://example.com/");
+        println!("usage: http <url>   e.g. https://example.com/");
         console::set_fg(console::FG);
         return;
     }
@@ -687,28 +687,28 @@ fn http(rest: &str) {
         return;
     }
 
-    // Accept a full URL or a bare `host/path`.
-    let without_scheme = rest.strip_prefix("http://").unwrap_or(rest);
-    let (host, path) = match without_scheme.split_once('/') {
-        Some((host, path)) => (host, format!("/{path}")),
-        None => (without_scheme, String::from("/")),
-    };
-    if host.is_empty() {
+    let Some(url) = net::parse_url(rest) else {
         console::set_fg(console::RED);
-        println!("missing host in '{rest}'");
+        println!("invalid URL '{rest}'");
         console::set_fg(console::FG);
         return;
-    }
-
+    };
     console::set_fg(console::DIM);
-    println!("GET http://{host}{path}");
+    println!("GET {}://{}{}", url.scheme, url.host, url.path);
     console::set_fg(console::FG);
-    if let Some(response) = net::http_get(host, &path) {
-        print_response(&response);
-    } else {
-        console::set_fg(console::RED);
-        println!("request failed");
-        console::set_fg(console::FG);
+
+    match net::fetch_url(rest) {
+        Ok(response) => {
+            console::set_fg(console::DIM);
+            println!("final URL: {}", response.final_url);
+            console::set_fg(console::FG);
+            print_response(&response.raw_text());
+        }
+        Err(error) => {
+            console::set_fg(console::RED);
+            println!("{error}");
+            console::set_fg(console::FG);
+        }
     }
 }
 

@@ -482,43 +482,41 @@ impl Desktop {
         self.browser_scroll = 0;
         self.render();
 
-        let without = url.strip_prefix("http://").unwrap_or(&url);
-        let (host, path) = match without.split_once('/') {
-            Some((host, path)) => (alloc::string::String::from(host), alloc::format!("/{path}")),
-            None => (
-                alloc::string::String::from(without),
-                alloc::string::String::from("/"),
-            ),
-        };
-        if host.is_empty() {
-            self.browser_status = alloc::string::String::from("Invalid address");
-            self.browser_lines =
-                alloc::vec![alloc::string::String::from("The address has no host name.")];
-            return;
-        }
-
         let columns = self.browser_columns();
-        if let Some(response) = crate::net::http_get(&host, &path) {
-            self.browser_status = browser::status_line(&response);
-            let body = browser::body(&response);
-            let mut lines = alloc::vec::Vec::new();
-            if let Some(title) = browser::title(body) {
-                lines.push(title);
-                lines.push(alloc::string::String::new());
+        match crate::net::fetch_url(&url) {
+            Ok(mut response) => {
+                self.browser_status = core::mem::take(&mut response.status_line);
+                let body = response.body_text();
+                let mut lines = alloc::vec::Vec::new();
+                if let Some(title) = browser::title(&body) {
+                    lines.push(title);
+                    lines.push(alloc::string::String::new());
+                }
+                lines.extend(browser::render(&body, columns));
+                if lines.is_empty() {
+                    lines.push(alloc::string::String::from(
+                        "(the page had no readable text)",
+                    ));
+                }
+                self.browser_lines = lines;
             }
-            lines.extend(browser::render(body, columns));
-            if lines.is_empty() {
-                lines.push(alloc::string::String::from(
-                    "(the page had no readable text)",
-                ));
+            Err(error) => {
+                self.browser_status = alloc::string::String::from("Request failed");
+                self.browser_lines = alloc::vec![
+                    alloc::format!("Could not fetch {url}"),
+                    error,
+                    alloc::string::String::from("Check the address and the network."),
+                ];
+                if url
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("https://")
+                {
+                    self.browser_lines.push(alloc::string::String::from(
+                        "HTTPS is experimental: certificates are not verified.",
+                    ));
+                }
             }
-            self.browser_lines = lines;
-        } else {
-            self.browser_status = alloc::string::String::from("Request failed");
-            self.browser_lines = alloc::vec![
-                alloc::format!("Could not fetch http://{host}{path}"),
-                alloc::string::String::from("Check the address and the network."),
-            ];
         }
         self.browser_scroll = 0;
     }

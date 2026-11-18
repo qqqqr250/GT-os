@@ -28,8 +28,8 @@
     extended INT 13h, which SeaBIOS does not provide for emulated CD drives.
 
 .PARAMETER Network
-    Also resolve a host name and fetch a page over HTTP. These checks reach the
-    real internet through QEMU's user-mode network, so they are opt-in.
+    Also resolve a host name and fetch pages over HTTP and HTTPS. These checks
+    reach the real internet through QEMU's user-mode network, so they are opt-in.
 
 .PARAMETER Audio
     Also verify that the AC'97 driver really produced samples: the guest's
@@ -270,7 +270,8 @@ try {
     if ($Network) {
         $checks += @(
             @{ Command = 'dns example.com'; Expect = 'example.com ->' },
-            @{ Command = 'http http://example.com/'; Expect = 'HTTP/1.' }
+            @{ Command = 'http http://example.com/'; Expect = 'HTTP/1.' },
+            @{ Command = 'http https://example.com/'; Expect = 'HTTP/1.' }
         )
     }
 

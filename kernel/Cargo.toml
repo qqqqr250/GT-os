@@ -60,3 +60,12 @@ linked_list_allocator = "0.10.5"
 # post-12: `Stream`/`StreamExt` and `AtomicWaker` for the async keyboard. The
 # queue and the once-cell are hand-written (see `src/sync`).
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+# HTTPS support: a no_std, no-allocator TLS 1.3 client. Certificate checking is
+# deliberately disabled (see `net.rs`) because this kernel has no trust store
+# or wall clock; this is an experimental pre-alpha feature.
+embedded-tls = { version = "0.19", default-features = false }
+embedded-io = { version = "0.7", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+# `force-soft` avoids the sha2 runtime-dispatch path that breaks LLVM on the
+# bare-metal target (the matching cfgs for aes/polyval live in .cargo/config.toml).
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

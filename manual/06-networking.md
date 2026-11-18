@@ -20,7 +20,8 @@ The stack is split across two modules:
   ports, finds the adapter, and enables its I/O space and bus-master bit.
 - `kernel/src/net.rs` is the driver and the protocol stack: the RTL8139 receive
   ring and four transmit descriptors, Ethernet framing, ARP, IPv4, ICMP echo,
-  UDP, a DNS resolver and a synchronous TCP client behind `http_get`.
+  UDP, a DNS resolver, a synchronous TCP client, `embedded-tls` for HTTPS, and a
+  small URL/HTTP client behind `fetch_url`.
 
 The driver is **polled** from the shell rather than interrupt-driven, so the
 whole stack stays single-threaded and the receive path is a plain "read the ring,
@@ -43,6 +44,12 @@ rustos> dns example.com
 resolving example.com ... example.com -> 93.184.216.34
 rustos> http http://example.com/
 GET http://example.com/
+final URL: http://example.com/
+HTTP/1.1 200 OK
+...
+rustos> http https://example.com/
+GET https://example.com/
+final URL: https://example.com/
 HTTP/1.1 200 OK
 ...
 ```
@@ -54,16 +61,26 @@ keeping the real destination in the IP header, because SLIRP only answers ARP fo
 the addresses it owns.
 
 The Windows XP-style **Browser** window has an editable address bar: type a URL,
-press **Enter** (or click **Go**) and it fetches the page over HTTP with
-`net::http_get`, converts the HTML to text (`kernel/src/browser.rs`) and shows the
-title, status line and body. The fetch blocks the UI for its duration, then
-returns to normal; the arrow and Page Up/Down keys scroll the rendered page.
+press **Enter** (or click **Go**) and it fetches the page with `net::fetch_url`,
+converts the HTML to text (`kernel/src/browser.rs`) and shows the title, status
+line and body. The fetch blocks the UI for its duration, then returns to normal;
+the arrow and Page Up/Down keys scroll the rendered page.
+
+`fetch_url` accepts `http://`, `https://` and bare `host/path` addresses, follows
+up to five redirects, decodes `Transfer-Encoding: chunked`, and does not ask for
+compression (so most pages arrive as plain HTML). HTTPS uses TLS 1.3 through the
+`embedded-tls` crate. Because the kernel has neither a root certificate store
+nor a wall clock, **certificate and hostname checks are disabled**: the
+connection is encrypted against passive observers but is vulnerable to an
+active man-in-the-middle. Treat HTTPS as a pre-alpha experiment, not a secure
+browser. Sites that require TLS 1.2 only, JavaScript, CSS layout, forms or
+cookies still will not work properly.
 
 ## Testing the network
 
 The smoke test always checks the adapter and pings the gateway. Pass `-Network`
-to also resolve a name and fetch a page, which needs the host to have internet
-access:
+to also resolve a name and fetch pages over HTTP and HTTPS, which needs the host
+to have internet access:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -Network

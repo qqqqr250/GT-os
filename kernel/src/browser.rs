@@ -30,23 +30,6 @@ pub fn title(html: &str) -> Option<String> {
     }
 }
 
-/// The status line (the first line of an HTTP response head).
-pub fn status_line(response: &str) -> String {
-    response.lines().next().unwrap_or("").trim().into()
-}
-
-/// The body of an HTTP response, after the blank line separating it from the
-/// headers. Falls back to the whole text when no separator is present.
-pub fn body(response: &str) -> &str {
-    match response.split_once("\r\n\r\n") {
-        Some((_, body)) => body,
-        None => match response.split_once("\n\n") {
-            Some((_, body)) => body,
-            None => response,
-        },
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tag stripping
 // ---------------------------------------------------------------------------

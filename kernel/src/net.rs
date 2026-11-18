@@ -13,6 +13,8 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -961,14 +963,25 @@ pub fn dhcp() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// TCP + HTTP
+// TCP, TLS, URL and HTTP
 // ---------------------------------------------------------------------------
+
+use embedded_io::{ErrorKind, Write as _};
+use embedded_tls::blocking::TlsConnection;
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsContext, UnsecureProvider};
+use rand_core::{CryptoRng, RngCore};
 
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
+
+/// Upper bound on a fetched document. The kernel heap is large enough for a
+/// real page, but an unlimited response would let one hostile server exhaust it.
+const RESPONSE_LIMIT: usize = 1024 * 1024;
+/// Maximum number of 3xx redirects to follow for one navigation.
+const MAX_REDIRECTS: usize = 5;
 
 struct Segment {
     sequence: u32,
@@ -986,6 +999,27 @@ struct Connection {
 }
 
 impl Connection {
+    /// Opens a connection with the three-way handshake.
+    fn connect(remote_ip: [u8; 4], remote_port: u16) -> Option<Self> {
+        let mut connection = Self {
+            local_port: 40_000 + (interrupts::ticks() as u16 % 1000),
+            remote_ip,
+            remote_port,
+            sequence: 0x1000_0000,
+            acknowledgement: 0,
+        };
+
+        connection.send(TCP_SYN, &[]);
+        let syn_ack = connection.wait_segment()?;
+        if (syn_ack.flags & (TCP_SYN | TCP_ACK)) != (TCP_SYN | TCP_ACK) {
+            return None;
+        }
+        connection.acknowledgement = syn_ack.sequence.wrapping_add(1);
+        connection.sequence = connection.sequence.wrapping_add(1);
+        connection.send(TCP_ACK, &[]);
+        Some(connection)
+    }
+
     fn build(&self, flags: u8, payload: &[u8]) -> Vec<u8> {
         let mut segment = Vec::with_capacity(20 + payload.len());
         segment.extend_from_slice(&self.local_port.to_be_bytes());
@@ -1036,62 +1070,489 @@ impl Connection {
     }
 }
 
-/// Fetches `path` from `host` over HTTP/1.0 and returns the raw response text.
-///
-/// `host` may be a dotted-quad address or a name to resolve.
-pub fn http_get(host: &str, path: &str) -> Option<String> {
-    let address = match parse_address(host) {
-        Some(address) => address,
-        None => resolve(host)?,
+#[derive(Debug)]
+struct NetIoError(ErrorKind);
+
+impl core::fmt::Display for NetIoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "network I/O error: {:?}", self.0)
+    }
+}
+
+impl core::error::Error for NetIoError {}
+
+impl embedded_io::Error for NetIoError {
+    fn kind(&self) -> ErrorKind {
+        self.0
+    }
+}
+
+/// Adapts the synchronous TCP client to the blocking `embedded_io` traits used
+/// by `embedded-tls`. Incoming payloads are `ACK`ed as they are consumed, which
+/// also gives plain `HTTP` one ordered byte stream instead of loose segments.
+struct TcpStream {
+    connection: Connection,
+    pending: Vec<u8>,
+    pending_pos: usize,
+    eof: bool,
+}
+
+impl TcpStream {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            pending: Vec::new(),
+            pending_pos: 0,
+            eof: false,
+        }
+    }
+
+    /// Waits for the next usable `TCP` segment, `ACK`ing payload as it arrives.
+    fn pump(&mut self) -> Result<(), NetIoError> {
+        let segment = self
+            .connection
+            .wait_segment()
+            .ok_or(NetIoError(ErrorKind::TimedOut))?;
+        if segment.flags & TCP_RST != 0 {
+            return Err(NetIoError(ErrorKind::ConnectionReset));
+        }
+
+        if !segment.payload.is_empty() && segment.sequence == self.connection.acknowledgement {
+            let length = segment.payload.len() as u32;
+            self.pending = segment.payload;
+            self.pending_pos = 0;
+            self.connection.acknowledgement = self.connection.acknowledgement.wrapping_add(length);
+            self.connection.send(TCP_ACK, &[]);
+        }
+
+        if segment.flags & TCP_FIN != 0 {
+            self.connection.acknowledgement = self.connection.acknowledgement.wrapping_add(1);
+            self.connection.send(TCP_FIN | TCP_ACK, &[]);
+            self.eof = true;
+        }
+        Ok(())
+    }
+}
+
+impl embedded_io::ErrorType for TcpStream {
+    type Error = NetIoError;
+}
+
+impl embedded_io::Read for TcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, NetIoError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        while self.pending_pos >= self.pending.len() {
+            if self.eof {
+                return Ok(0);
+            }
+            self.pump()?;
+        }
+        let available = &self.pending[self.pending_pos..];
+        let count = available.len().min(buf.len());
+        buf[..count].copy_from_slice(&available[..count]);
+        self.pending_pos += count;
+        Ok(count)
+    }
+}
+
+impl embedded_io::Write for TcpStream {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, NetIoError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Keep each outgoing segment below the NIC's 2048-byte TX buffer.
+        let count = buf.len().min(1200);
+        self.connection.send(TCP_PSH | TCP_ACK, &buf[..count]);
+        self.connection.sequence = self.connection.sequence.wrapping_add(count as u32);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> Result<(), NetIoError> {
+        Ok(())
+    }
+}
+
+/// A deliberately small, non-cryptographic RNG used only for the TLS client
+/// nonce and ephemeral key pair. Seeding mixes RDTSC, the PIT and the MAC; this
+/// is adequate for a pre-alpha experimental browser but is not a real CSPRNG.
+struct KernelRng {
+    state: u64,
+}
+
+impl KernelRng {
+    fn new() -> Self {
+        let low: u32;
+        let high: u32;
+        // SAFETY: `rdtsc` only reads the timestamp counter; it has no memory
+        // operands and is available in ring 0 on the x86_64 target.
+        unsafe {
+            core::arch::asm!(
+                "rdtsc",
+                out("eax") low,
+                out("edx") high,
+                options(nomem, nostack)
+            );
+        }
+        let mut seed = (u64::from(high) << 32) | u64::from(low);
+        seed ^= interrupts::ticks().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for (index, byte) in MAC.iter().enumerate() {
+            seed ^= u64::from(*byte).wrapping_shl((index % 8) as u32 * 8);
+        }
+        Self { state: seed | 1 }
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut value = self.state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.state = value;
+        value.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+}
+
+impl RngCore for KernelRng {
+    fn next_u32(&mut self) -> u32 {
+        self.next() as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.next()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(8) {
+            let bytes = self.next().to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl CryptoRng for KernelRng {}
+
+/// A parsed absolute or bare-host URL.
+pub struct Url {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+}
+
+impl Url {
+    fn authority(&self) -> String {
+        let default_port = (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443);
+        if default_port {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    fn is_tls(&self) -> bool {
+        self.scheme == "https"
+    }
+}
+
+/// Parses `http://host:port/path`, `https://...` or a bare `host/path`.
+pub fn parse_url(input: &str) -> Option<Url> {
+    let input = input.trim();
+    let without_fragment = input.split_once('#').map_or(input, |(before, _)| before);
+
+    let (scheme, rest) = if let Some(rest) = without_fragment.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = without_fragment.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        ("http", without_fragment)
     };
 
-    let mut connection = Connection {
-        local_port: 40_000 + (interrupts::ticks() as u16 % 1000),
-        remote_ip: address,
-        remote_port: 80,
-        sequence: 0x1000_0000,
-        acknowledgement: 0,
-    };
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let mut authority = &rest[..authority_end];
+    // User information is accepted but never used: this browser has no auth UI.
+    if let Some((_, after)) = authority.rsplit_once('@') {
+        authority = after;
+    }
 
-    // Three-way handshake.
-    connection.send(TCP_SYN, &[]);
-    let syn_ack = connection.wait_segment()?;
-    if syn_ack.flags & (TCP_SYN | TCP_ACK) != TCP_SYN | TCP_ACK {
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed.find(']')?;
+        let host = bracketed[..close].to_string();
+        let tail = &bracketed[close + 1..];
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port.parse().ok()?,
+            None => default_port,
+        };
+        (host, port)
+    } else {
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port))
+                if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                (host, port.parse().ok()?)
+            }
+            _ => (authority, default_port),
+        };
+        (host.to_string(), port)
+    };
+    if host.is_empty() {
         return None;
     }
-    connection.acknowledgement = syn_ack.sequence.wrapping_add(1);
-    connection.sequence = connection.sequence.wrapping_add(1);
-    connection.send(TCP_ACK, &[]);
 
-    let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: RustOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    );
-    connection.send(TCP_PSH | TCP_ACK, request.as_bytes());
-    connection.sequence = connection.sequence.wrapping_add(request.len() as u32);
+    let rest_path = &rest[authority_end..];
+    let path = if rest_path.is_empty() {
+        String::from("/")
+    } else if rest_path.starts_with('/') {
+        rest_path.to_string()
+    } else {
+        format!("/{rest_path}")
+    };
 
-    let mut response = Vec::new();
-    while response.len() < 256 * 1024 {
-        let Some(segment) = connection.wait_segment() else {
-            break;
-        };
-        if segment.flags & TCP_RST != 0 {
+    Some(Url {
+        scheme: scheme.into(),
+        host,
+        port,
+        path,
+    })
+}
+
+/// Resolves a `Location` header against the URL that produced it.
+fn absolute_url(base: &Url, location: &str) -> String {
+    let location = location.trim();
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_string();
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        return format!("{}:{rest}", base.scheme);
+    }
+    if location.starts_with('?') {
+        return format!(
+            "{}://{}{}{}",
+            base.scheme,
+            base.authority(),
+            base.path,
+            location
+        );
+    }
+    if location.starts_with('/') {
+        return format!("{}://{}{}", base.scheme, base.authority(), location);
+    }
+    let directory = base.path.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+    format!(
+        "{}://{}{}/{}",
+        base.scheme,
+        base.authority(),
+        directory,
+        location
+    )
+}
+
+/// A fetched HTTP response with headers already decoded.
+pub struct Response {
+    pub status: u16,
+    pub status_line: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub final_url: String,
+}
+
+impl Response {
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Reconstructs the wire form for the shell's existing response printer.
+    pub fn raw_text(&self) -> String {
+        let mut text = String::new();
+        text.push_str(&self.status_line);
+        text.push_str("\r\n");
+        for (key, value) in &self.headers {
+            text.push_str(key);
+            text.push_str(": ");
+            text.push_str(value);
+            text.push_str("\r\n");
+        }
+        text.push_str("\r\n");
+        text.push_str(&self.body_text());
+        text
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Decodes `Transfer-Encoding: chunked`, which HTTP/1.1 servers use when the
+/// response length is not known in advance.
+fn decode_chunked(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut position = 0;
+    while position < input.len() {
+        let line_end =
+            find_bytes(&input[position..], b"\r\n").map_or(input.len(), |offset| position + offset);
+        let line = String::from_utf8_lossy(&input[position..line_end]);
+        let size_text = line.split(';').next().unwrap_or("0").trim();
+        let size = usize::from_str_radix(size_text, 16).unwrap_or(0);
+        position = line_end + 2;
+        if size == 0 || position + size > input.len() {
             break;
         }
-        if !segment.payload.is_empty() && segment.sequence == connection.acknowledgement {
-            response.extend_from_slice(&segment.payload);
-            connection.acknowledgement = connection
-                .acknowledgement
-                .wrapping_add(segment.payload.len() as u32);
-            connection.send(TCP_ACK, &[]);
-        }
-        if segment.flags & TCP_FIN != 0 {
-            connection.acknowledgement = connection.acknowledgement.wrapping_add(1);
-            connection.send(TCP_FIN | TCP_ACK, &[]);
+        output.extend_from_slice(&input[position..position + size]);
+        position += size;
+        if input.get(position..position + 2) == Some(b"\r\n") {
+            position += 2;
+        } else {
             break;
         }
     }
+    output
+}
 
-    Some(String::from_utf8_lossy(&response).into_owned())
+fn parse_response(raw: &[u8], url: &Url) -> Response {
+    let head_end = find_bytes(raw, b"\r\n\r\n")
+        .map(|offset| offset + 4)
+        .or_else(|| find_bytes(raw, b"\n\n").map(|offset| offset + 2))
+        .unwrap_or(raw.len());
+    let head = String::from_utf8_lossy(&raw[..head_end]);
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or("").trim().to_string();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+
+    let mut headers = Vec::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+
+    let mut body = raw[head_end..].to_vec();
+    let chunked = headers.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case("transfer-encoding") && value.contains("chunked")
+    });
+    if chunked {
+        body = decode_chunked(&body);
+    }
+
+    Response {
+        status,
+        status_line,
+        headers,
+        body,
+        final_url: format!("{}://{}{}", url.scheme, url.authority(), url.path),
+    }
+}
+
+fn read_all<R: embedded_io::Read>(reader: &mut R, limit: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while bytes.len() < limit {
+        match reader.read(&mut buffer) {
+            // A timeout or a TLS close without `close_notify` is normal once
+            // the server has sent the document; keep what we received.
+            Ok(0) | Err(_) => break,
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+        }
+    }
+    bytes
+}
+
+/// Fetches one URL, without following redirects.
+fn fetch_once(url: &Url) -> Result<Response, String> {
+    if !is_up() {
+        return Err(String::from("No network adapter"));
+    }
+    let address = parse_address(&url.host)
+        .or_else(|| resolve(&url.host))
+        .ok_or_else(|| format!("Could not resolve {}", url.host))?;
+    let connection = Connection::connect(address, url.port)
+        .ok_or_else(|| format!("Could not connect to {}:{}", url.host, url.port))?;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: RustOS/0.1 (pre-alpha)\r\nAccept: */*\r\nAccept-Language: en\r\nConnection: close\r\n\r\n",
+        url.path,
+        url.authority()
+    );
+
+    let raw = if url.is_tls() {
+        let mut stream = TcpStream::new(connection);
+        // The read buffer must fit the largest possible TLS record (16640 B).
+        let mut read_buffer = vec![0u8; 16_640];
+        let mut write_buffer = vec![0u8; 4096];
+        let mut tls = TlsConnection::<_, Aes128GcmSha256>::new(
+            &mut stream,
+            &mut read_buffer,
+            &mut write_buffer,
+        );
+        let config = TlsConfig::new()
+            .with_server_name(&url.host)
+            // Most certificates are still RSA-signed. `NoVerify` means we never
+            // actually check the signature, so no RSA dependency is required.
+            .enable_rsa_signatures();
+        let provider = UnsecureProvider::new::<Aes128GcmSha256>(KernelRng::new());
+        let context = TlsContext::new(&config, provider);
+        tls.open(context)
+            .map_err(|error| format!("TLS handshake failed ({error:?})"))?;
+        tls.write_all(request.as_bytes())
+            .map_err(|error| format!("TLS request failed ({error:?})"))?;
+        tls.flush()
+            .map_err(|error| format!("TLS flush failed ({error:?})"))?;
+        read_all(&mut tls, RESPONSE_LIMIT)
+    } else {
+        let mut stream = TcpStream::new(connection);
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("Request failed: {error}"))?;
+        read_all(&mut stream, RESPONSE_LIMIT)
+    };
+
+    Ok(parse_response(&raw, url))
+}
+
+/// Fetches a URL over HTTP or HTTPS, following up to [`MAX_REDIRECTS`] redirects.
+///
+/// # Security
+///
+/// HTTPS encrypts the connection but does **not** verify the server
+/// certificate: this kernel has neither a trust store nor a clock. It protects
+/// against passive observers only and is vulnerable to an active attacker.
+pub fn fetch_url(input: &str) -> Result<Response, String> {
+    let mut url = parse_url(input).ok_or_else(|| String::from("Invalid URL"))?;
+    for _ in 0..=MAX_REDIRECTS {
+        let response = fetch_once(&url)?;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            let location = response
+                .header("location")
+                .ok_or_else(|| String::from("Redirect without Location header"))?;
+            let next = absolute_url(&url, location);
+            url = parse_url(&next).ok_or_else(|| String::from("Invalid redirect URL"))?;
+            continue;
+        }
+        return Ok(response);
+    }
+    Err(String::from("Too many redirects"))
 }
 
 /// Parses a dotted-quad IPv4 address.
