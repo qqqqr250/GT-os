@@ -72,7 +72,7 @@ prints those paths when the build finishes.
 | `alloc` | allocate and free 78 KiB on the heap |
 | `uptime` | seconds since boot, from the PIT |
 | `cpu` | CPUID vendor and brand string |
-| `logo` | redraw the banner |
+| `logo` | redraw the GT logo and banner |
 | `about` | what this OS is |
 | `net` | show the adapter, address, gateway and DNS server |
 | `dhcp` | (re)acquire an address from a DHCP server |
@@ -89,10 +89,80 @@ prints those paths when the build finishes.
 | `play <file>` | play a WAV file from the data disk through AC'97 |
 | `format` | reformat the FAT16 data disk |
 | `run [file]` | run a flat ring-3 program (no file: the built-in demo) |
-| `pkg list` | list the in-OS package registry |
+| `pkg [list]` | list packages (installed, auto or available) |
+| `pkg search <text>` | search package names and descriptions |
+| `pkg info <name>` | show metadata, dependencies and reverse dependencies |
+| `pkg depends <name>` | show build and runtime dependency edges |
+| `pkg recipe <name>` | show cookbook-style recipe metadata |
+| `pkg install <name>...` | install packages and their missing dependencies |
+| `pkg remove <name>...` | remove packages and orphaned automatic dependencies |
+| `pkg mark <manual\|auto> <name>...` | change a package's install flag |
+| `pkg pack <out> <file>...` | build a `.pkga` archive on the data disk |
+| `pkg archive <file>` | verify a `.pkga` archive on the data disk |
 | `panic` | trigger a kernel panic (tests the panic path) |
 | `reboot` | pulse the keyboard controller reset line |
 | `shutdown` | halt the machine (the guest stays powered on in VirtualBox) |
+
+### Packages
+
+`pkg` tracks packages as a dependency graph, following the model of Redox's
+[pkgutils](https://gitlab.redox-os.org/redox-os/pkgutils). Each entry records
+its dependencies and the packages that depend on it (reverse edges), whether
+it was installed manually or pulled in automatically, and whether it is
+protected. Installing resolves the full transitive closure; removing refuses
+to break a live dependent and cleans up automatic dependencies that become
+orphaned. Protected core packages (`base`, `terminal` and the default apps)
+cannot be removed.
+
+There is no remote repository yet — the catalog is compiled into the kernel,
+so `pkg install` only changes this in-memory state. Package names follow the
+Redox grammar `[host:|target:]recipe[.suffix]`; for example `host:foo` and
+`foo.pkg` are distinct, valid names. Try `pkg install calculator`: it pulls in
+`mathlib` automatically, and `pkg remove calculator` removes both again unless
+you first run `pkg mark manual mathlib`.
+
+Each catalog entry also has a **recipe** modelled on Redox's
+[cookbook](https://gitlab.redox-os.org/redox-os/cookbook): a `source` (`builtin`,
+`archive:<file>` or `meta`), a build kind, and separate `[build]` and `[package]`
+dependency lists. Build dependencies are needed only to compile a package;
+runtime dependencies are the ones the install graph follows. `pkg recipe <name>`
+prints the recipe, for example:
+
+```
+pkg recipe calculator
+pkg recipe desktop
+```
+
+`desktop` is a meta package — like cookbook's `groups` category — with no files
+of its own, so `pkg install desktop` pulls in the whole default desktop as one
+transaction. `demo` demonstrates an archive-sourced entry (`archive:DEMO.PKGA`);
+since GTos has no in-guest build backend, installing it tracks state only.
+
+### Package archives
+
+Inspired by Redox's [pkgar](https://gitlab.redox-os.org/redox-os/pkgar) format,
+`kernel/src/pkgar.rs` implements a small **`.pkga`** archive: a fixed 136-byte
+header, 308-byte entries holding a SHA-256 file hash, an offset, a size, a mode
+and a validated path, followed by the concatenated file data. The header hashes
+the entire entry table, so a single flipped bit in any entry is detected before
+a file is read; every file is hashed again on extraction. Paths are checked for
+`..`, absolute components and Windows drive syntax so an archive cannot escape
+the FAT root directory.
+
+The layout mirrors pkgar's reproducible, hashed-header design but is **not**
+binary-compatible with Redox: GTos uses SHA-256 instead of Blake3/Ed25519 and a
+different magic, because the kernel has neither a signature scheme nor a remote
+repository. Try it in the VM:
+
+```
+write HELLO.TXT Hello from GTos
+pkg pack TEST.PKGA HELLO.TXT
+pkg archive TEST.PKGA
+```
+
+The host build tool `cargo run --bin pkgar -- out.pkga file...` creates the same
+bytes, so archives can also be prepared outside the guest and copied to the
+data disk.
 
 See [Verifying GTos](11-testing.md) for a checklist of things to try once the
 VM is running.

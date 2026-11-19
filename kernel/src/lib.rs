@@ -39,10 +39,14 @@ mod font;
 mod input;
 mod interrupts;
 mod keyboard;
+mod logo;
+mod logo_data;
 mod memory;
 mod mouse;
 mod net;
 mod pci;
+mod pkg;
+mod pkgar;
 mod scheme;
 mod serial;
 mod shell;
@@ -75,6 +79,10 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             vga::init(offset);
         }
     }
+
+    // Draw the GT logo above the boot log when a framebuffer is available; in
+    // VGA text mode this is a no-op and the text banner stands on its own.
+    logo::draw_boot();
 
     // Everything up to the heap initialization is allocation-free: the banner
     // and the boot log use `format_args!`, never `format!`.

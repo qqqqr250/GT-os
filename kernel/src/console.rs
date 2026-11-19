@@ -402,6 +402,29 @@ pub fn clear_screen() {
     }
 }
 
+/// Clears a strip of `pixels` rows at the current cursor and moves the cursor
+/// just below it. Returns the pixel `y` of the strip's top edge, so a caller can
+/// draw a bitmap there without text overwriting it. Returns `0` when there is
+/// no framebuffer (the VGA text fallback has no pixel coordinates).
+pub fn reserve_bitmap(pixels: usize) -> usize {
+    let mut guard = CONSOLE.lock();
+    let Some(console) = guard.as_mut() else {
+        return 0;
+    };
+    let Some(fb) = console.fb.as_mut() else {
+        return 0;
+    };
+    let line = fb.line_height();
+    let rows = pixels.div_ceil(line);
+    let strip = rows * line;
+    let top = fb.y;
+    let available = fb.info.height.saturating_sub(top);
+    fb.fill_rect(0, top, fb.info.width, strip.min(available), fb.bg);
+    fb.y = (top + strip).min(fb.info.height.saturating_sub(line));
+    fb.x = 0;
+    top
+}
+
 /// Console geometry as `(columns, rows)`, if a framebuffer is present.
 /// Returns a mutable reference to the framebuffer buffer, if one exists.
 static mut EMPTY_BUF: [u8; 0] = [];

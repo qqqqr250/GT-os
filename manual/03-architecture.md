@@ -17,6 +17,8 @@ kernel\
   src\vga.rs             legacy VGA text-mode console fallback (0xb8000)
   src\volatile.rs        Volatile<T>: the one place raw device pointers are read/written
   src\font.rs            generated 8x8 bitmap font
+  src\logo_data.rs       generated 128x128 2-bpp GT logo bitmap
+  src\logo.rs            framebuffer logo renderer (boot strip + `logo` command)
   src\memory.rs          heap selection, the global allocator and the paging layer (post-08, post-10/11)
   src\allocator.rs       the Locked wrapper and the allocator designs module (post-11)
   src\allocator\bump.rs   the bump allocator design
@@ -35,6 +37,8 @@ kernel\
   src\pci.rs             PCI bus-0 configuration-space scan (0xCF8/0xCFC)
   src\net.rs             RTL8139/E1000 drivers + IPv4/ARP/ICMP/UDP/DNS/TCP stack + DHCP + HTTP(S)
   src\scheme.rs          Redox-style `file:/`, `net:/`, `sys:/` namespace and descriptor table
+  src\pkg.rs             Redox-inspired package dependency graph (`pkg` state)
+  src\pkgar.rs           clean-room `.pkga` archive reader/writer (pkgar-inspired)
   src\audio.rs           AC'97 codec driver (DMA buffer descriptor list)
   src\ata.rs             ATA PIO driver for the primary IDE channel (LBA28)
   src\fat.rs             read/write FAT16 filesystem
@@ -125,6 +129,48 @@ names and, for `cat`, `open`, `play`, `rm` and `run`, FAT16 file names. Completi
 only rewrites the line when there is exactly one candidate. The GUI Command
 Prompt shares the same history and completion code, so both front ends behave
 identically.
+
+`kernel/src/pkg.rs` adopts the dependency-graph model from Redox's
+[pkgutils](https://gitlab.redox-os.org/redox-os/pkgutils) rather than its old
+flat "installed = true" flags: validated `[host:|target:]recipe[.suffix]` names,
+manual vs. automatic install flags, protected packages, dependency and reverse
+dependency sets, and install/uninstall resolution that refuses to break a live
+dependent. The graph logic is kept separate from the shell so a real backend can
+replace the compiled-in catalog later.
+
+The catalog entries carry recipes shaped like Redox
+[cookbook](https://gitlab.redox-os.org/redox-os/cookbook)'s `recipe.toml`: a
+`source` (`builtin`, `archive:<file>` or `meta`), a build kind, and — crucially —
+**separate build-time and runtime dependency lists**, just as cookbook splits
+`[build] dependencies` from `[package] dependencies`. Only the runtime list
+drives the install graph; the build list is metadata for a future build backend.
+`desktop` is a meta package (cookbook's `groups` idea): no source, no build, only
+a dependency group. `pkg recipe <name>` exposes the whole record. Cookbook's git
+sources, tarball checksums, build templates and cross-compilation scripts are
+deliberately omitted — there is no in-guest compiler or package fetcher here.
+
+`kernel/src/pkgar.rs` takes the archive idea from Redox's
+[pkgar](https://gitlab.redox-os.org/redox-os/pkgar): a reproducible, hashed
+header and fixed-size file entries that can be integrity-checked independently
+of the data. GTos uses its own `.pkga` layout — a 136-byte header, 308-byte
+entries and SHA-256 instead of Blake3/Ed25519 — so it is **not** binary-compatible
+with Redox archives. This is deliberate: the kernel has no signature scheme or
+remote repository, so it keeps only the auditable container shape (entry-table
+hash, per-file hash, checked ranges, validated paths) and leaves signing to a
+future backend. `pkg pack` builds such an archive from FAT files and `pkg
+archive` verifies one; the host `cargo run --bin pkgar` produces the same bytes.
+
+## Boot logo
+
+The GT logo (a yellow disc with a blue ring and red "GT" letters) is embedded as
+a 128x128, 2-bpp bitmap in `kernel/src/logo_data.rs`. `tools/gen-logo.ps1`
+regenerates it from `tools/logo-source.jpg`; the near-white picture background
+becomes palette index 0, which `kernel/src/logo.rs` treats as transparent. At
+boot, `logo::draw_boot` asks `console::reserve_bitmap` to clear and reserve a
+strip at the top of the framebuffer, then paints the logo there magnified to
+about a quarter of the screen height. In VGA text mode there is no bitmap to
+draw, so the text banner stands alone. The `logo` command repaints the bitmap at
+its boot position, which also restores it after `clear`.
 
 ## Console fallback
 

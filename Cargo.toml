@@ -28,6 +28,7 @@ publish = false
 workspace = true
 
 [dependencies]
+sha2 = "0.10"
 
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }

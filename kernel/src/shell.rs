@@ -10,7 +10,7 @@ use bootloader_api::info::{BootInfo, MemoryRegionKind};
 use spin::Mutex;
 
 use crate::console::{print, println};
-use crate::{ata, audio, console, fat, input, interrupts, memory, net, task, usermode};
+use crate::{ata, audio, console, fat, input, interrupts, memory, net, pkg, task, usermode};
 
 const PROMPT: &str = "gtos> ";
 const BANNER_WIDTH: usize = 62;
@@ -323,6 +323,7 @@ pub fn execute(line: &str, boot_info: &BootInfo) {
         "uptime" => uptime(),
         "cpu" => cpu(),
         "logo" => {
+            crate::logo::redraw();
             banner();
             println!();
         }
@@ -361,164 +362,401 @@ pub fn execute(line: &str, boot_info: &BootInfo) {
 // Package manager
 // ---------------------------------------------------------------------------
 
-/// A simple package registry. In a real OS this would be backed by a
-/// filesystem and a remote repository; here the packages are built in.
-struct Package {
-    name: &'static str,
-    version: &'static str,
-    description: &'static str,
-    installed: bool,
+/// Lazily initialised dependency graph. A `Mutex` replaces the old
+/// `static mut` flags, so state access is explicit even though the kernel is
+/// currently single-threaded.
+static PACKAGE_STATE: Mutex<Option<pkg::PackageState>> = Mutex::new(None);
+
+fn with_packages<T>(f: impl FnOnce(&mut pkg::PackageState) -> T) -> T {
+    let mut guard = PACKAGE_STATE.lock();
+    if guard.is_none() {
+        *guard = Some(pkg::initial_state());
+    }
+    // `guard` was just populated above.
+    f(guard.as_mut().unwrap())
 }
 
-static mut PACKAGES: [Package; 8] = [
-    Package {
-        name: "terminal",
-        version: "1.0",
-        description: "Terminal emulator window",
-        installed: true,
-    },
-    Package {
-        name: "about",
-        version: "1.0",
-        description: "About GTos information window",
-        installed: true,
-    },
-    Package {
-        name: "mycomputer",
-        version: "1.0",
-        description: "System information and drives",
-        installed: true,
-    },
-    Package {
-        name: "mydocuments",
-        version: "1.0",
-        description: "Document browser",
-        installed: true,
-    },
-    Package {
-        name: "browser",
-        version: "1.0",
-        description: "Web browser (HTTP over the RTL8139 NIC)",
-        installed: true,
-    },
-    Package {
-        name: "controlpanel",
-        version: "1.0",
-        description: "System control panel",
-        installed: true,
-    },
-    Package {
-        name: "cmd",
-        version: "1.0",
-        description: "Command prompt window",
-        installed: true,
-    },
-    Package {
-        name: "calculator",
-        version: "1.0",
-        description: "Calculator (not yet implemented)",
-        installed: false,
-    },
-];
+fn pkg_error(error: &pkg::PackageError) {
+    console::set_fg(console::RED);
+    println!("pkg: {error}");
+    console::set_fg(console::FG);
+}
 
-#[allow(clippy::manual_find, clippy::needless_range_loop)]
-fn find_package(name: &str) -> Option<usize> {
-    for i in 0..8 {
-        // SAFETY: single-threaded, no concurrent access.
-        if unsafe { PACKAGES[i].name } == name {
-            return Some(i);
+fn pkg_name_list(names: &[pkg::PackageName]) -> String {
+    if names.is_empty() {
+        return String::from("[none]");
+    }
+    names
+        .iter()
+        .map(pkg::PackageName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_names(args: &[&str]) -> Option<Vec<pkg::PackageName>> {
+    let mut names = Vec::new();
+    for arg in args {
+        match pkg::PackageName::new(arg) {
+            Ok(name) => names.push(name),
+            Err(error) => {
+                pkg_error(&error);
+                // One bad name rejects the whole command: callers must not
+                // mutate state with the subset that happened to parse.
+                return None;
+            }
         }
     }
-    None
+    if names.is_empty() {
+        pkg_error(&pkg::PackageError::InvalidName(String::from(
+            "expected at least one package name",
+        )));
+        return None;
+    }
+    Some(names)
 }
 
-fn package_manager(args: &str, _boot_info: &BootInfo) {
-    let args = args.trim();
-    if args.is_empty() || args == "list" {
-        println!("Installed packages:");
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..8 {
-            let (name, version, desc, installed) = unsafe {
-                (
-                    PACKAGES[i].name,
-                    PACKAGES[i].version,
-                    PACKAGES[i].description,
-                    PACKAGES[i].installed,
-                )
-            };
-            if installed {
-                console::set_fg(console::GREEN);
-                print!("  [installed] ");
+/// Parses a single required package name, distinguishing a missing argument
+/// from a malformed one so the error names the real cause.
+fn parse_one_name(arg: Option<&str>, command: &str) -> Option<pkg::PackageName> {
+    let Some(arg) = arg else {
+        pkg_error(&pkg::PackageError::InvalidName(format!(
+            "{command} needs a name"
+        )));
+        return None;
+    };
+    match pkg::PackageName::new(arg) {
+        Ok(name) => Some(name),
+        Err(error) => {
+            pkg_error(&error);
+            None
+        }
+    }
+}
+
+fn pkg_find(name: &pkg::PackageName) -> Option<pkg::Package> {
+    pkg::catalog().into_iter().find(|entry| &entry.name == name)
+}
+
+fn pkg_list() {
+    let catalog = pkg::catalog();
+    with_packages(|state| {
+        println!("Packages:");
+        for entry in &catalog {
+            let (label, color) = if !state.is_installed(&entry.name) {
+                ("available", console::DIM)
+            } else if state.installed[&entry.name].manual {
+                ("installed", console::GREEN)
             } else {
-                console::set_fg(console::DIM);
-                print!("  [available] ");
-            }
+                ("auto", console::CYAN)
+            };
+            console::set_fg(color);
+            print!("  [{label:^9}] ");
             console::set_fg(console::CYAN);
-            print!("{name}");
+            print!("{}", entry.name.as_str());
             console::set_fg(console::DIM);
-            println!(" v{version} - {desc}");
+            println!(" v{} - {}", entry.version, entry.description);
         }
         console::set_fg(console::FG);
         println!();
-        println!("Use 'pkg install <name>' or 'pkg remove <name>'.");
-    } else if let Some(name) = args.strip_prefix("install ") {
-        let name = name.trim();
-        if let Some(i) = find_package(name) {
-            unsafe {
-                if PACKAGES[i].installed {
-                    println!("{name} is already installed.");
-                } else {
-                    PACKAGES[i].installed = true;
-                    println!("Installed {name} v{}.", PACKAGES[i].version);
-                }
+        println!("Manual packages are ones you asked for; auto packages are dependencies.");
+    });
+}
+
+fn pkg_info(name: &pkg::PackageName) {
+    let Some(entry) = pkg_find(name) else {
+        pkg_error(&pkg::PackageError::NotFound(name.clone()));
+        return;
+    };
+    with_packages(|state| {
+        let manual = state.installed.get(name).is_some_and(|s| s.manual);
+        let status = if !state.is_installed(name) {
+            "available"
+        } else if manual {
+            "installed (manual)"
+        } else {
+            "installed (auto)"
+        };
+        let dependencies = pkg_name_list(entry.runtime_dependencies());
+        let dependents: Vec<String> = state
+            .installed
+            .iter()
+            .filter(|(_, s)| s.dependencies.contains(name))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        let required_by = if dependents.is_empty() {
+            String::from("[none]")
+        } else {
+            dependents.join(", ")
+        };
+        println!("Package: {}", name.as_str());
+        println!("Version: {}", entry.version);
+        println!("Description: {}", entry.description);
+        println!("Status: {status}");
+        println!("Source: {}", entry.recipe.source);
+        println!("Build: {}", entry.recipe.build);
+        println!("Runtime deps: {dependencies}");
+        println!("Required by: {required_by}");
+    });
+}
+
+fn pkg_depends(name: &pkg::PackageName) {
+    let Some(entry) = pkg_find(name) else {
+        pkg_error(&pkg::PackageError::NotFound(name.clone()));
+        return;
+    };
+    let build = pkg_name_list(entry.build_dependencies());
+    let runtime = pkg_name_list(entry.runtime_dependencies());
+    println!("{} build deps: {build}", name.as_str());
+    println!("{} runtime deps: {runtime}", name.as_str());
+    with_packages(|state| {
+        let dependents: Vec<String> = state
+            .installed
+            .iter()
+            .filter(|(_, s)| s.dependencies.contains(name))
+            .map(|(name, _)| name.to_string())
+            .collect();
+        let required_by = if dependents.is_empty() {
+            String::from("[none]")
+        } else {
+            dependents.join(", ")
+        };
+        println!("Installed packages needing {name}: {required_by}");
+    });
+}
+
+fn pkg_recipe(name: &pkg::PackageName) {
+    let Some(entry) = pkg_find(name) else {
+        pkg_error(&pkg::PackageError::NotFound(name.clone()));
+        return;
+    };
+    println!("recipe.toml for {name}");
+    println!("  version = \"{}\"", entry.version);
+    println!("  source  = {}", entry.recipe.source);
+    println!("  build   = {}", entry.recipe.build);
+    println!(
+        "  [build] dependencies      = {}",
+        pkg_name_list(entry.build_dependencies())
+    );
+    println!(
+        "  [package] dependencies    = {}",
+        pkg_name_list(entry.runtime_dependencies())
+    );
+}
+
+fn pkg_install(args: &[&str]) {
+    let Some(names) = parse_names(args) else {
+        return;
+    };
+    let catalog = pkg::catalog();
+    with_packages(|state| match state.install(&catalog, &names) {
+        Ok(added) if added.is_empty() => println!("Already installed; nothing to do."),
+        Ok(added) => {
+            for name in added {
+                println!("Installed {name}.");
             }
-        } else {
-            console::set_fg(console::RED);
-            println!("Unknown package: {name}");
-            console::set_fg(console::FG);
         }
-    } else if let Some(name) = args.strip_prefix("remove ") {
-        let name = name.trim();
-        if let Some(i) = find_package(name) {
-            unsafe {
-                if PACKAGES[i].installed {
-                    PACKAGES[i].installed = false;
-                    println!("Removed {name}.");
-                } else {
-                    println!("{name} is not installed.");
-                }
+        Err(error) => pkg_error(&error),
+    });
+}
+
+fn pkg_remove(args: &[&str]) {
+    let Some(names) = parse_names(args) else {
+        return;
+    };
+    with_packages(|state| match state.uninstall(&names) {
+        Ok(removed) if removed.is_empty() => println!("Not installed; nothing to do."),
+        Ok(removed) => {
+            for name in removed {
+                println!("Removed {name}.");
             }
-        } else {
-            console::set_fg(console::RED);
-            println!("Unknown package: {name}");
-            console::set_fg(console::FG);
         }
-    } else if let Some(name) = args.strip_prefix("info ") {
-        let name = name.trim();
-        if let Some(i) = find_package(name) {
-            let (version, desc, installed) = unsafe {
-                (
-                    PACKAGES[i].version,
-                    PACKAGES[i].description,
-                    PACKAGES[i].installed,
-                )
-            };
-            println!("Package: {name}");
-            println!("Version: {version}");
-            println!("Description: {desc}");
-            println!(
-                "Status: {}",
-                if installed { "installed" } else { "available" }
-            );
-        } else {
-            console::set_fg(console::RED);
-            println!("Unknown package: {name}");
-            console::set_fg(console::FG);
+        Err(error) => pkg_error(&error),
+    });
+}
+
+fn pkg_search(text: &str) {
+    let needle = text.to_lowercase();
+    let catalog = pkg::catalog();
+    with_packages(|state| {
+        let mut found = 0usize;
+        for entry in &catalog {
+            let haystack = format!("{} {}", entry.name.as_str(), entry.description);
+            if haystack.to_lowercase().contains(&needle) {
+                found += 1;
+                let label = if state.is_installed(&entry.name) {
+                    "*"
+                } else {
+                    " "
+                };
+                console::set_fg(console::CYAN);
+                println!(
+                    "{label} {} v{} - {}",
+                    entry.name.as_str(),
+                    entry.version,
+                    entry.description
+                );
+            }
         }
-    } else {
-        console::set_fg(console::RED);
-        println!("Usage: pkg [list|install <name>|remove <name>|info <name>]");
         console::set_fg(console::FG);
+        if found == 0 {
+            println!("No packages match '{text}'.");
+        }
+    });
+}
+
+fn pkg_mark(mode: &str, args: &[&str]) {
+    if mode != "manual" && mode != "auto" {
+        console::set_fg(console::RED);
+        println!("Usage: pkg mark <manual|auto> <name>...");
+        console::set_fg(console::FG);
+        return;
+    }
+    let Some(names) = parse_names(args) else {
+        return;
+    };
+    with_packages(|state| {
+        let changed = state.mark_as_manual(mode == "manual", &names);
+        if changed.is_empty() {
+            println!("Nothing changed.");
+        } else {
+            for name in changed {
+                println!("Marked {name} as {mode}.");
+            }
+        }
+    });
+}
+
+fn pkg_archive(name: &str) {
+    let Some(bytes) = fat::with_volume(|volume| volume.read(name)).flatten() else {
+        console::set_fg(console::RED);
+        println!("pkg: cannot read '{name}' from the data disk");
+        console::set_fg(console::FG);
+        return;
+    };
+    match crate::pkgar::Archive::parse(&bytes) {
+        Ok(archive) => {
+            println!(
+                "Archive '{name}': {} entries, {} data bytes",
+                archive.entries.len(),
+                archive.data_len()
+            );
+            println!(
+                "  format v{} / arch {} / SHA-256",
+                archive.header.version, archive.header.arch
+            );
+            for entry in &archive.entries {
+                println!(
+                    "  {:>8} bytes  mode {:o}  {}",
+                    entry.size, entry.mode, entry.path
+                );
+            }
+            console::set_fg(console::GREEN);
+            println!("  integrity: ok (entry table and every file verified)");
+            console::set_fg(console::FG);
+        }
+        Err(error) => {
+            console::set_fg(console::RED);
+            println!("pkg: archive error: {error:?}");
+            console::set_fg(console::FG);
+        }
+    }
+}
+
+fn pkg_pack(output: &str, inputs: &[&str]) {
+    if inputs.is_empty() {
+        console::set_fg(console::RED);
+        println!("pkg: pack needs at least one input file");
+        console::set_fg(console::FG);
+        return;
+    }
+    let mut files = Vec::new();
+    for name in inputs {
+        let Some(data) = fat::with_volume(|volume| volume.read(name)).flatten() else {
+            console::set_fg(console::RED);
+            println!("pkg: cannot read '{name}' from the data disk");
+            console::set_fg(console::FG);
+            return;
+        };
+        files.push((String::from(*name), data));
+    }
+    match crate::pkgar::build(&files) {
+        Ok(bytes) => {
+            let written = fat::with_volume(|volume| volume.write(output, &bytes)).unwrap_or(false);
+            if written {
+                println!(
+                    "Packed {} file(s) into '{output}' ({} bytes).",
+                    files.len(),
+                    bytes.len()
+                );
+                println!("Verify with: pkg archive {output}");
+            } else {
+                console::set_fg(console::RED);
+                println!("pkg: cannot write '{output}' to the data disk");
+                console::set_fg(console::FG);
+            }
+        }
+        Err(error) => {
+            console::set_fg(console::RED);
+            println!("pkg: archive error: {error:?}");
+            console::set_fg(console::FG);
+        }
+    }
+}
+
+fn package_manager(args: &str, _boot_info: &BootInfo) {
+    let mut parts = args.split_whitespace();
+    let Some(command) = parts.next() else {
+        pkg_list();
+        return;
+    };
+    match command {
+        "list" => pkg_list(),
+        "search" => {
+            let text = parts.collect::<Vec<_>>().join(" ");
+            pkg_search(&text);
+        }
+        "info" => {
+            if let Some(name) = parse_one_name(parts.next(), "info") {
+                pkg_info(&name);
+            }
+        }
+        "depends" => {
+            if let Some(name) = parse_one_name(parts.next(), "depends") {
+                pkg_depends(&name);
+            }
+        }
+        "recipe" => {
+            if let Some(name) = parse_one_name(parts.next(), "recipe") {
+                pkg_recipe(&name);
+            }
+        }
+        "archive" => {
+            if let Some(name) = parts.next() {
+                pkg_archive(name);
+            } else {
+                println!("Usage: pkg archive <file>");
+            }
+        }
+        "pack" => {
+            let output = parts.next().unwrap_or("");
+            pkg_pack(output, &parts.collect::<Vec<_>>());
+        }
+        "install" => pkg_install(&parts.collect::<Vec<_>>()),
+        "remove" => pkg_remove(&parts.collect::<Vec<_>>()),
+        "mark" => {
+            let mode = parts.next().unwrap_or("");
+            pkg_mark(mode, &parts.collect::<Vec<_>>());
+        }
+        _ => {
+            console::set_fg(console::RED);
+            println!("Usage: pkg [list|search <text>|info <name>|depends <name>|recipe <name>]");
+            println!(
+                "       pkg [install <name>...|remove <name>...|mark <manual|auto> <name>...]"
+            );
+            println!("       pkg pack <out> <file>...   (build a .pkga on the data disk)");
+            println!("       pkg archive <file>         (verify a .pkga on the data disk)");
+            console::set_fg(console::FG);
+        }
     }
 }
 
@@ -532,7 +770,7 @@ fn help() {
         ("alloc", "allocate on the heap to test the allocator"),
         ("uptime", "time since boot, driven by the PIT"),
         ("cpu", "CPUID vendor and model"),
-        ("logo", "redraw the banner"),
+        ("logo", "redraw the GT logo and banner"),
         ("about", "what this OS is"),
         ("net", "show the network adapter and address"),
         ("dhcp", "get an address from a DHCP server"),
@@ -564,10 +802,28 @@ fn help() {
         ("panic", "trigger a kernel panic (for testing)"),
         ("reboot", "reboot the machine"),
         ("shutdown", "halt the machine"),
-        ("pkg list", "list available packages"),
-        ("pkg install <name>", "install a package"),
-        ("pkg remove <name>", "remove a package"),
-        ("pkg info <name>", "show package info"),
+        ("pkg [list]", "list packages (installed/auto/available)"),
+        ("pkg search <text>", "search names and descriptions"),
+        ("pkg info <name>", "show package info and reverse deps"),
+        (
+            "pkg depends <name>",
+            "show build and runtime dependency edges",
+        ),
+        ("pkg recipe <name>", "show cookbook-style recipe metadata"),
+        (
+            "pkg install <name>...",
+            "install packages with dependencies",
+        ),
+        ("pkg remove <name>...", "remove packages and orphaned deps"),
+        ("pkg mark <mode> <name>...", "set manual/auto install flag"),
+        (
+            "pkg pack <out> <file>...",
+            "build a .pkga archive on the data disk",
+        ),
+        (
+            "pkg archive <file>",
+            "verify a .pkga archive on the data disk",
+        ),
     ];
 
     println!("Commands:");
@@ -1069,9 +1325,12 @@ fn write_file(rest: &str) {
         content.push_str(text);
         content.push_str("\r\n");
     } else {
-        println!("type the file, end with a line containing only '.'");
+        println!("type the file, end with a line containing only '.' (Ctrl-C cancels)");
         loop {
-            let line = prompt_line();
+            let Some(line) = prompt_line() else {
+                // Ctrl-C: abandon the file without creating or writing it.
+                return;
+            };
             if line == "." {
                 break;
             }
@@ -1205,14 +1464,14 @@ fn run_program(name: &str) {
     console::set_fg(console::FG);
 }
 
-/// Reads one more line from the console, used by `write`.
-fn prompt_line() -> String {
+/// Reads one more line from the console, used by `write`. Returns `None` when
+/// the user cancels with Ctrl-C so the caller can abort the whole operation.
+fn prompt_line() -> Option<String> {
     console::set_fg(console::DIM);
     print!("> ");
     console::set_fg(console::FG);
     let mut line = String::new();
-    read_line(&mut line);
-    line
+    read_line(&mut line).then_some(line)
 }
 
 // ---------------------------------------------------------------------------

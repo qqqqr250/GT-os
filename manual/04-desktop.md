@@ -14,18 +14,29 @@ flickering through a full-screen repaint:
 - a vertical blue gradient wallpaper,
 - a taskbar along the bottom with a green **start** button that opens a Start
   menu; the Start-menu entries open real windows (My Computer, Settings,
-  Command Prompt, Run..., About GTos, Log Off, Shut Down), and the taskbar
-  window buttons raise their window when clicked,
-- draggable windows with Luna-blue title bars, a close button (which frees the
-  slot so a window can be reopened), and a drop shadow; the desktop starts empty
-  at boot and windows open on demand from the Start menu, the desktop icons or
-  **F1** (Browser) or **F2** (file manager), while the Windows key toggles the
-  Start menu,
+  Command Prompt, Calculator, Run..., About GTos, Log Off, Shut Down), and the
+  taskbar window buttons raise their window when clicked,
+- draggable, resizable windows with Luna-blue title bars, maximize/restore and
+  close buttons (closing frees the slot so a window can be reopened), and a drop
+  shadow; drag the title bar to move a window, click the square button to fill
+  the desktop above the taskbar (click again to restore the original size), and
+  drag the bottom-right grip to resize. The desktop starts empty at boot and
+  windows open on demand from the Start menu, the desktop icons or **F1**
+  (Browser) or **F2** (file manager), while the Windows key toggles the Start
+  menu,
 - a Browser with clickable links (**Tab** cycles through them, **Enter**
   follows the focused one) and address-bar web search,
 - a Command Prompt that runs real shell commands and shares the shell's
   Ion-style history (**Up**/**Down**) and **Tab** completion,
+- a Calculator with an on-screen keypad (or keyboard input) that evaluates
+  `+ - * /`, parentheses and decimals with correct precedence; invalid
+  expressions and division by zero show `error` instead of panicking,
 - a classic 12x19 arrow pointer whose hotspot is the top-left pixel.
+
+The maximize/restore geometry and corner-resize grip follow the patterns in
+[Orbital](https://gitlab.redox-os.org/redox-os/orbital) (a saved `restore` rect
+per window and a corner resize handle); this is a clean-room implementation in
+`kernel\src\wm.rs`, not a port of Orbital's compositor.
 
 ## File manager
 

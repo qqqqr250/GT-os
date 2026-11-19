@@ -63,6 +63,11 @@ const TASKBAR_HEIGHT: usize = 30;
 const TITLE_BAR_HEIGHT: usize = 22;
 const BORDER_WIDTH: usize = 3;
 const CLOSE_BTN_SIZE: usize = 16;
+/// Bottom-right drag handle, mirroring Orbital's `CORNER_RESIZE_SIZE`.
+const CORNER_RESIZE_SIZE: usize = 16;
+/// Smallest window the resize handle will produce.
+const MIN_WINDOW_W: usize = 240;
+const MIN_WINDOW_H: usize = 140;
 const START_BTN_WIDTH: usize = 90;
 const TASKBAR_BTN_WIDTH: usize = 140;
 const TASKBAR_BTN_GAP: usize = 8;
@@ -72,16 +77,30 @@ const TASKBAR_BTN_GAP: usize = 8;
 const MENU_WIDTH: usize = 200;
 const MENU_HEADER: usize = 44;
 const MENU_ITEM_HEIGHT: usize = 24;
-const MENU_ITEMS: [&str; 7] = [
+const MENU_ITEMS: [&str; 8] = [
     "My Computer",
     "Settings",
     "Command Prompt",
+    "Calculator",
     "Run...",
     "About GTos",
     "Log Off",
     "Shut Down",
 ];
 const MENU_HEIGHT: usize = MENU_HEADER + MENU_ITEMS.len() * MENU_ITEM_HEIGHT + 8;
+
+/// Calculator keypad, 5 columns x 4 rows. `0` marks an empty cell.
+const CALC_KEYS: [u8; 20] = [
+    b'7', b'8', b'9', b'/', b'C', b'4', b'5', b'6', b'*', b'(', b'1', b'2', b'3', b'-', b')', b'0',
+    b'.', b'=', b'+', 0,
+];
+const CALC_COLS: usize = 5;
+const CALC_GAP: usize = 6;
+const CALC_KEY_H: usize = 30;
+/// The keypad starts 82px below the window top and its last row ends at 220px,
+/// so Calculator needs more height than the generic minimum to avoid drawing
+/// keys outside the window.
+const CALC_MIN_H: usize = 228;
 
 /// The pointer's bounding box, in pixels (matches `CURSOR_SHAPE`).
 const CURSOR_W: usize = 12;
@@ -123,6 +142,38 @@ pub struct Rect {
     pub h: usize,
 }
 
+impl Rect {
+    const fn contains(self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+/// Title-bar buttons, as `(maximize, close)`. Drawing and hit-testing both use
+/// this so the pixels a user sees always match the rectangle that responds.
+fn title_buttons(r: Rect) -> (Rect, Rect) {
+    let close = Rect {
+        x: r.x + r.w - BORDER_WIDTH - CLOSE_BTN_SIZE - 4,
+        y: r.y + BORDER_WIDTH + 3,
+        w: CLOSE_BTN_SIZE,
+        h: CLOSE_BTN_SIZE - 2,
+    };
+    let maximize = Rect {
+        x: close.x.saturating_sub(CLOSE_BTN_SIZE + 4),
+        ..close
+    };
+    (maximize, close)
+}
+
+/// Bottom-right resize grip, mirroring Orbital's `bottom_corner_rect`.
+fn resize_handle(r: Rect) -> Rect {
+    Rect {
+        x: r.x + r.w.saturating_sub(CORNER_RESIZE_SIZE),
+        y: r.y + r.h.saturating_sub(CORNER_RESIZE_SIZE),
+        w: CORNER_RESIZE_SIZE.min(r.w),
+        h: CORNER_RESIZE_SIZE.min(r.h),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Window {
     pub rect: Rect,
@@ -131,6 +182,9 @@ pub struct Window {
     pub dragging: bool,
     pub drag_offset_x: isize,
     pub drag_offset_y: isize,
+    /// Geometry to return to when a maximized window is restored. Orbital keeps
+    /// the same `restore` snapshot alongside each window.
+    pub restore: Option<Rect>,
     pub content: WindowContent,
 }
 
@@ -145,6 +199,7 @@ pub enum WindowContent {
     Browser,
     Settings,
     CommandPrompt,
+    Calculator,
     Run,
     /// A simple read-only viewer for text files opened from the file manager.
     TextViewer,
@@ -162,6 +217,7 @@ impl WindowContent {
             WindowContent::Browser => (900, 600),
             WindowContent::Settings => (420, 320),
             WindowContent::CommandPrompt => (480, 300),
+            WindowContent::Calculator => (380, 300),
             WindowContent::Run => (380, 190),
             WindowContent::TextViewer => (560, 400),
             WindowContent::LogOff => (320, 170),
@@ -197,6 +253,8 @@ pub struct Desktop {
     pub mouse_down: bool,
     pub mouse_was_down: bool,
     pub dragging_window: Option<usize>,
+    /// Window currently being resized through its bottom-right grip.
+    pub resizing_window: Option<usize>,
     /// Cascade offset counter for newly opened windows.
     spawn_count: usize,
     /// Which Start-menu entry the pointer is over, if any.
@@ -211,6 +269,10 @@ pub struct Desktop {
     /// Current input line.
     cp_input: [u8; 128],
     cp_input_len: usize,
+    /// Calculator: the expression being typed and the last formatted result.
+    calc_expr: [u8; 80],
+    calc_len: usize,
+    calc_result: alloc::string::String,
     /// Browser window: the editable address, the last laid-out page, the
     /// scroll offset into it and a status line.
     browser_url: [u8; 512],
@@ -287,6 +349,7 @@ impl Desktop {
             mouse_down: false,
             mouse_was_down: false,
             dragging_window: None,
+            resizing_window: None,
             spawn_count: 0,
             menu_hover: None,
             settings_selected: None,
@@ -294,6 +357,9 @@ impl Desktop {
             cp_output: alloc::string::String::new(),
             cp_input: [0; 128],
             cp_input_len: 0,
+            calc_expr: [0; 80],
+            calc_len: 0,
+            calc_result: alloc::string::String::new(),
             browser_url: [0; 512],
             browser_url_len: 0,
             browser_page: browser::Page::default(),
@@ -451,6 +517,35 @@ impl Desktop {
         }
     }
 
+    /// Geometry of a maximized window: the full desktop above the taskbar.
+    fn maximized_rect(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height.saturating_sub(TASKBAR_HEIGHT),
+        }
+    }
+
+    /// Toggles window `i` between its saved geometry and the maximized one. The
+    /// saved rect survives drags and resizes only while maximized (where those
+    /// gestures are disabled), so restore always returns to the original size.
+    fn toggle_maximize(&mut self, i: usize) {
+        let maximized = self.maximized_rect();
+        let Some(w) = self.windows[i].as_mut() else {
+            return;
+        };
+        if let Some(restore) = w.restore.take() {
+            w.rect = restore;
+        } else {
+            w.restore = Some(w.rect);
+            w.rect = maximized;
+        }
+        self.dragging_window = None;
+        self.resizing_window = None;
+        self.taskbar_dirty = true;
+    }
+
     /// Opens a window for a Start-menu entry, focusing the existing one instead
     /// of duplicating it. New windows are cascaded so they do not stack exactly.
     fn spawn_window(&mut self, title: &'static str, content: WindowContent) -> Option<usize> {
@@ -476,6 +571,7 @@ impl Desktop {
             dragging: false,
             drag_offset_x: 0,
             drag_offset_y: 0,
+            restore: None,
             content,
         })?;
         if matches!(
@@ -490,8 +586,90 @@ impl Desktop {
             self.cp_output.push_str("Type 'help' for commands.\n\n");
             self.cp_output.push_str("C:\\> ");
         }
+        if content == WindowContent::Calculator {
+            self.calc_len = 0;
+            self.calc_result.clear();
+        }
         self.activate(idx);
         Some(idx)
+    }
+
+    // -----------------------------------------------------------------------
+    // Calculator window
+    // -----------------------------------------------------------------------
+
+    /// Keypad origin and key width inside window `r`.
+    fn calc_layout(r: Rect) -> (usize, usize, usize) {
+        let left = r.x + BORDER_WIDTH + 8;
+        let top = r.y + TITLE_BAR_HEIGHT + 8 + 52;
+        let width = r.w.saturating_sub(2 * BORDER_WIDTH + 16);
+        let key_w = width.saturating_sub(CALC_GAP * (CALC_COLS - 1)) / CALC_COLS;
+        (left, top, key_w)
+    }
+
+    fn calc_push(&mut self, key: u8) {
+        if self.calc_len < self.calc_expr.len() {
+            self.calc_expr[self.calc_len] = key;
+            self.calc_len += 1;
+        }
+    }
+
+    fn calc_clear(&mut self) {
+        self.calc_len = 0;
+        self.calc_result.clear();
+    }
+
+    fn calc_evaluate(&mut self) {
+        let expr = &self.calc_expr[..self.calc_len];
+        self.calc_result = match eval_calc(expr) {
+            Some(value) => calc_format(value),
+            None => alloc::string::String::from("error"),
+        };
+    }
+
+    /// Handles one typed byte, returning whether the calculator consumed it.
+    fn calc_key(&mut self, byte: u8) -> bool {
+        match byte {
+            b'0'..=b'9' | b'+' | b'-' | b'*' | b'/' | b'(' | b')' | b'.' => {
+                self.calc_push(byte);
+                true
+            }
+            8 | 127 => {
+                self.calc_len = self.calc_len.saturating_sub(1);
+                true
+            }
+            b'c' | b'C' => {
+                self.calc_clear();
+                true
+            }
+            b'\r' | b'\n' | b'=' => {
+                self.calc_evaluate();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Hit-tests the on-screen keypad and applies the key that was pressed.
+    fn calc_click(&mut self, r: Rect, x: usize, y: usize) -> bool {
+        let (left, top, key_w) = Self::calc_layout(r);
+        let stride = key_w + CALC_GAP;
+        for (index, &key) in CALC_KEYS.iter().enumerate() {
+            if key == 0 {
+                continue;
+            }
+            let kx = left + (index % CALC_COLS) * stride;
+            let ky = top + (index / CALC_COLS) * (CALC_KEY_H + CALC_GAP);
+            if x >= kx && x < kx + key_w && y >= ky && y < ky + CALC_KEY_H {
+                match key {
+                    b'C' => self.calc_clear(),
+                    b'=' => self.calc_evaluate(),
+                    other => self.calc_push(other),
+                }
+                return true;
+            }
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -1880,25 +2058,51 @@ impl Desktop {
         // Title text.
         self.draw_text(r.x + 8, r.y + BORDER_WIDTH + 4, w.title, COL_TEXT_WHITE, 1);
 
-        // Close button.
-        let cb_x = r.x + r.w - BORDER_WIDTH - CLOSE_BTN_SIZE - 4;
-        let cb_y = r.y + BORDER_WIDTH + 3;
+        // Title-bar buttons: maximize/restore (left) and close (right). The
+        // same rectangles are used by `handle_click` for hit-testing.
+        let (max_btn, close_btn) = title_buttons(r);
+        let glyph = Color(0xF0_F0_F0);
+        self.draw_rect_border(max_btn, glyph, 1);
+        if w.restore.is_some() {
+            // Two overlapping squares: "restore down".
+            self.fill_rect_xy(max_btn.x + 3, max_btn.y + 4, 7, 6, glyph);
+            self.fill_rect_xy(max_btn.x + 5, max_btn.y + 2, 7, 6, glyph);
+        } else {
+            self.fill_rect_xy(max_btn.x + 3, max_btn.y + 3, 8, 8, Color(0x50_50_50));
+        }
         self.fill_rect_xy(
-            cb_x,
-            cb_y,
-            CLOSE_BTN_SIZE,
-            CLOSE_BTN_SIZE - 2,
+            close_btn.x,
+            close_btn.y,
+            close_btn.w,
+            close_btn.h,
             COL_CLOSE_RED,
         );
-        // X on close button.
         for i in 0..CLOSE_BTN_SIZE - 6 {
-            self.put_pixel(cb_x + 3 + i, cb_y + 2 + i, COL_TEXT_WHITE);
-            self.put_pixel(cb_x + 3 + i, cb_y + CLOSE_BTN_SIZE - 4 - i, COL_TEXT_WHITE);
+            self.put_pixel(close_btn.x + 3 + i, close_btn.y + 2 + i, COL_TEXT_WHITE);
+            self.put_pixel(
+                close_btn.x + 3 + i,
+                close_btn.y + CLOSE_BTN_SIZE - 4 - i,
+                COL_TEXT_WHITE,
+            );
         }
 
         // Window content (skipped during drag for performance).
         if !self.skip_content {
             self.draw_window_content(w);
+        }
+
+        // Resize grip, drawn last so content cannot paint over it.
+        if w.restore.is_none() {
+            let grip = resize_handle(r);
+            for i in 0..3 {
+                let len = 3 + i * 4;
+                self.hline(
+                    grip.x + grip.w - len - 2,
+                    grip.y + grip.h - 4 - i * 3,
+                    len,
+                    Color(0x90_90_90),
+                );
+            }
         }
     }
 
@@ -2587,6 +2791,51 @@ impl Desktop {
                     self.put_pixel(cx, y + 7, text);
                 }
             }
+            WindowContent::Calculator => {
+                let disp_w = r.w.saturating_sub(2 * BORDER_WIDTH + 16);
+                // Display: the expression above, the result below in larger type.
+                self.fill_rect_xy(cx, cy, disp_w, 42, Color(0xEC_E9_D8));
+                self.draw_rect_border(
+                    Rect {
+                        x: cx,
+                        y: cy,
+                        w: disp_w,
+                        h: 42,
+                    },
+                    COL_BORDER,
+                    1,
+                );
+                let expr: alloc::string::String = self.calc_expr[..self.calc_len]
+                    .iter()
+                    .map(|&byte| byte as char)
+                    .collect();
+                self.draw_text(cx + 6, cy + 4, &expr, Color(0x60_60_60), 1);
+                self.draw_text(cx + 6, cy + 20, &self.calc_result, COL_TEXT, 2);
+
+                // Keypad.
+                let (left, top, key_w) = Self::calc_layout(r);
+                for (index, &key) in CALC_KEYS.iter().enumerate() {
+                    if key == 0 {
+                        continue;
+                    }
+                    let kx = left + (index % CALC_COLS) * (key_w + CALC_GAP);
+                    let ky = top + (index / CALC_COLS) * (CALC_KEY_H + CALC_GAP);
+                    self.fill_rect_xy(kx, ky, key_w, CALC_KEY_H, Color(0xF0_F0_F0));
+                    self.draw_rect_border(
+                        Rect {
+                            x: kx,
+                            y: ky,
+                            w: key_w,
+                            h: CALC_KEY_H,
+                        },
+                        COL_BORDER,
+                        1,
+                    );
+                    let key_bytes = [key];
+                    let label = core::str::from_utf8(&key_bytes).unwrap_or("?");
+                    self.draw_text(kx + key_w / 2 - 4, ky + 11, label, COL_TEXT, 1);
+                }
+            }
             WindowContent::Run => {
                 let box_w = r.w.saturating_sub(2 * BORDER_WIDTH + 16);
                 self.draw_text(cx, cy, "Type the name of a program, folder", COL_TEXT, 1);
@@ -2968,12 +3217,33 @@ impl Desktop {
                 continue;
             }
 
-            // Close button.
-            let cb_x = r.x + r.w - BORDER_WIDTH - CLOSE_BTN_SIZE - 4;
-            let cb_y = r.y + BORDER_WIDTH + 3;
-            if x >= cb_x && x < cb_x + CLOSE_BTN_SIZE && y >= cb_y && y < cb_y + CLOSE_BTN_SIZE - 2
-            {
+            // Title-bar buttons and the resize grip share their rectangles
+            // with the drawing code, so a click always lands where it looks.
+            let (max_btn, close_btn) = title_buttons(r);
+            if close_btn.contains(x, y) {
                 self.close_window(i);
+                return;
+            }
+            if max_btn.contains(x, y) {
+                let idx = self.activate(i);
+                self.toggle_maximize(idx);
+                return;
+            }
+            if w.restore.is_none() && resize_handle(r).contains(x, y) {
+                // Corner resize: measure the grab offset from the bottom-right
+                // corner rather than the top-left used by window moves.
+                let idx = self.activate(i);
+                self.resizing_window = Some(idx);
+                if let Some(w) = &mut self.windows[idx] {
+                    w.drag_offset_x = x as isize - (r.x + r.w) as isize;
+                    w.drag_offset_y = y as isize - (r.y + r.h) as isize;
+                }
+                return;
+            }
+
+            // Calculator: on-screen keypad.
+            if w.content == WindowContent::Calculator && self.calc_click(r, x, y) {
+                self.activate(i);
                 return;
             }
 
@@ -3060,7 +3330,9 @@ impl Desktop {
             // Raise and activate, then start a title-bar drag on the window's
             // new slot (raising can move it).
             let idx = self.activate(i);
-            if y >= r.y + BORDER_WIDTH && y < r.y + TITLE_BAR_HEIGHT {
+            // A maximized window is moved by restoring it first; dragging its
+            // title bar directly would detach it from the maximized geometry.
+            if w.restore.is_none() && y >= r.y + BORDER_WIDTH && y < r.y + TITLE_BAR_HEIGHT {
                 self.dragging_window = Some(idx);
                 if let Some(w) = &mut self.windows[idx] {
                     w.dragging = true;
@@ -3116,20 +3388,46 @@ impl Desktop {
                 self.spawn_window("Command Prompt", WindowContent::CommandPrompt);
             }
             3 => {
-                self.spawn_window("Run", WindowContent::Run);
+                self.spawn_window("Calculator", WindowContent::Calculator);
             }
             4 => {
-                self.spawn_window("About GTos", WindowContent::About);
+                self.spawn_window("Run", WindowContent::Run);
             }
             5 => {
+                self.spawn_window("About GTos", WindowContent::About);
+            }
+            6 => {
                 self.spawn_window("Log Off", WindowContent::LogOff);
             }
-            6 => crate::shell::shutdown(),
+            7 => crate::shell::shutdown(),
             _ => {}
         }
     }
 
     fn handle_drag(&mut self, x: usize, y: usize) {
+        if let Some(i) = self.resizing_window {
+            if let Some(w) = self.windows[i].as_mut() {
+                let right = (x as isize - w.drag_offset_x).max(0) as usize;
+                let bottom = (y as isize - w.drag_offset_y).max(0) as usize;
+                // Read `content` before borrowing `rect` mutably below.
+                let min_h = if w.content == WindowContent::Calculator {
+                    CALC_MIN_H
+                } else {
+                    MIN_WINDOW_H
+                };
+                let r = &mut w.rect;
+                let max_w = self.width.saturating_sub(r.x);
+                let max_h = self
+                    .height
+                    .saturating_sub(TASKBAR_HEIGHT)
+                    .saturating_sub(r.y);
+                // `min` after `max` keeps the clamp valid even when the screen
+                // edge leaves less room than the minimum; `clamp` would panic.
+                r.w = right.saturating_sub(r.x).max(MIN_WINDOW_W).min(max_w);
+                r.h = bottom.saturating_sub(r.y).max(min_h).min(max_h);
+            }
+            return;
+        }
         if let Some(i) = self.dragging_window {
             if let Some(w) = &mut self.windows[i] {
                 let new_x = (x as isize - w.drag_offset_x).max(0) as usize;
@@ -3147,6 +3445,125 @@ impl Desktop {
             }
         }
         self.dragging_window = None;
+        self.resizing_window = None;
+    }
+}
+
+/// Recursive-descent evaluator for the calculator: `+ - * /`, parentheses and
+/// decimals. Malformed input, unbalanced parentheses and division by zero all
+/// return `None`; the caller displays "error" rather than panicking.
+fn eval_calc(expr: &[u8]) -> Option<f64> {
+    struct Parser<'a> {
+        expr: &'a [u8],
+        pos: usize,
+    }
+
+    impl Parser<'_> {
+        fn skip_ws(&mut self) {
+            while self.expr.get(self.pos) == Some(&b' ') {
+                self.pos += 1;
+            }
+        }
+
+        fn sum(&mut self) -> Option<f64> {
+            let mut value = self.product()?;
+            loop {
+                self.skip_ws();
+                match self.expr.get(self.pos).copied() {
+                    Some(b'+') => {
+                        self.pos += 1;
+                        value += self.product()?;
+                    }
+                    Some(b'-') => {
+                        self.pos += 1;
+                        value -= self.product()?;
+                    }
+                    _ => return Some(value),
+                }
+            }
+        }
+
+        fn product(&mut self) -> Option<f64> {
+            let mut value = self.factor()?;
+            loop {
+                self.skip_ws();
+                match self.expr.get(self.pos).copied() {
+                    Some(b'*') => {
+                        self.pos += 1;
+                        value *= self.factor()?;
+                    }
+                    Some(b'/') => {
+                        self.pos += 1;
+                        let divisor = self.factor()?;
+                        if divisor == 0.0 {
+                            return None;
+                        }
+                        value /= divisor;
+                    }
+                    _ => return Some(value),
+                }
+            }
+        }
+
+        fn factor(&mut self) -> Option<f64> {
+            self.skip_ws();
+            match self.expr.get(self.pos).copied() {
+                Some(b'(') => {
+                    self.pos += 1;
+                    let value = self.sum()?;
+                    self.skip_ws();
+                    if self.expr.get(self.pos) != Some(&b')') {
+                        return None;
+                    }
+                    self.pos += 1;
+                    Some(value)
+                }
+                Some(b'-') => {
+                    self.pos += 1;
+                    Some(-self.factor()?)
+                }
+                _ => self.number(),
+            }
+        }
+
+        fn number(&mut self) -> Option<f64> {
+            self.skip_ws();
+            let mut value = 0.0_f64;
+            let mut seen = false;
+            while matches!(self.expr.get(self.pos), Some(b'0'..=b'9')) {
+                value = value * 10.0 + f64::from(self.expr[self.pos] - b'0');
+                self.pos += 1;
+                seen = true;
+            }
+            if self.expr.get(self.pos) == Some(&b'.') {
+                self.pos += 1;
+                let mut scale = 0.1_f64;
+                while matches!(self.expr.get(self.pos), Some(b'0'..=b'9')) {
+                    value += f64::from(self.expr[self.pos] - b'0') * scale;
+                    scale *= 0.1;
+                    self.pos += 1;
+                    seen = true;
+                }
+            }
+            seen.then_some(value)
+        }
+    }
+
+    let mut parser = Parser { expr, pos: 0 };
+    let value = parser.sum()?;
+    parser.skip_ws();
+    (parser.pos == expr.len()).then_some(value)
+}
+
+/// Formats a result to four decimals, then trims trailing zeros so `2+2`
+/// reads `4` rather than `4.0000`.
+fn calc_format(value: f64) -> alloc::string::String {
+    let text = alloc::format!("{value:.4}");
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        alloc::string::String::from("0")
+    } else {
+        alloc::string::String::from(trimmed)
     }
 }
 
@@ -3240,6 +3657,7 @@ pub fn run() {
                 }
                 changed |= match active {
                     Some(WindowContent::CommandPrompt) => d.cp_key(byte),
+                    Some(WindowContent::Calculator) => d.calc_key(byte),
                     Some(WindowContent::Browser) => d.browser_key(byte),
                     Some(WindowContent::MyComputer | WindowContent::MyDocuments) => d.fm_key(byte),
                     Some(WindowContent::TextViewer) => d.fm_viewer_key(byte),
@@ -3274,14 +3692,14 @@ pub fn run() {
                 d.handle_release();
                 scene_changed = true;
             }
-            if d.mouse_down && d.dragging_window.is_some() {
+            if d.mouse_down && (d.dragging_window.is_some() || d.resizing_window.is_some()) {
                 d.handle_drag(mx as usize, my as usize);
                 scene_changed = true;
             }
             d.mouse_was_down = d.mouse_down;
 
-            // Skip window content during drag to keep it smooth.
-            d.skip_content = d.dragging_window.is_some();
+            // Skip window content during a move or resize to keep it smooth.
+            d.skip_content = d.dragging_window.is_some() || d.resizing_window.is_some();
 
             if scene_changed {
                 d.render();
@@ -3301,5 +3719,76 @@ pub fn run() {
         }
 
         x86_64::instructions::hlt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn title_buttons_are_separate_and_inside_the_title_bar() {
+        let r = Rect {
+            x: 40,
+            y: 30,
+            w: 480,
+            h: 320,
+        };
+        let (maximize, close) = title_buttons(r);
+        assert_eq!(maximize.y, close.y);
+        assert!(maximize.x + maximize.w < close.x);
+        assert!(close.x + close.w <= r.x + r.w);
+        assert!(close.y + close.h <= r.y + TITLE_BAR_HEIGHT);
+    }
+
+    #[test_case]
+    fn resize_handle_stays_inside_small_windows() {
+        let r = Rect {
+            x: 10,
+            y: 10,
+            w: MIN_WINDOW_W,
+            h: MIN_WINDOW_H,
+        };
+        let grip = resize_handle(r);
+        assert!(grip.x >= r.x && grip.x + grip.w <= r.x + r.w);
+        assert!(grip.y >= r.y && grip.y + grip.h <= r.y + r.h);
+        assert!(grip.contains(r.x + r.w - 1, r.y + r.h - 1));
+    }
+
+    #[test_case]
+    fn calculator_respects_operator_precedence() {
+        assert_eq!(eval_calc(b"2+3*4"), Some(14.0));
+        assert_eq!(eval_calc(b"(2+3)*4"), Some(20.0));
+        assert_eq!(eval_calc(b"10/4"), Some(2.5));
+        assert_eq!(eval_calc(b"-3+5"), Some(2.0));
+    }
+
+    #[test_case]
+    fn calculator_rejects_invalid_expressions() {
+        assert_eq!(eval_calc(b"1/0"), None);
+        assert_eq!(eval_calc(b"2+"), None);
+        assert_eq!(eval_calc(b"(2+3"), None);
+        assert_eq!(eval_calc(b"2 3"), None);
+    }
+
+    #[test_case]
+    fn calculator_trims_trailing_zeros() {
+        assert_eq!(calc_format(4.0), "4");
+        assert_eq!(calc_format(2.5), "2.5");
+        assert_eq!(calc_format(0.0), "0");
+    }
+
+    #[test_case]
+    fn rect_contains_excludes_the_far_edge() {
+        let r = Rect {
+            x: 5,
+            y: 5,
+            w: 10,
+            h: 10,
+        };
+        assert!(r.contains(5, 5));
+        assert!(r.contains(14, 14));
+        assert!(!r.contains(15, 5));
+        assert!(!r.contains(5, 15));
     }
 }
