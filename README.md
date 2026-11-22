@@ -39,6 +39,10 @@ The manual lives in [`manual/`](manual/), which is its authoritative source.
 - [Unix-like kernel rewrite](manual/16-unix-rewrite.md)
 - [License and credits](manual/14-license-and-credits.md)
 
+## Support
+
+If you'd like to support GTos development, you can [donate on Ko-fi](https://ko-fi.com/jc592301).
+
 ## License
 
 GTos is released under the [MIT License](LICENSE).
