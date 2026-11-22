@@ -1,0 +1,27 @@
+[package]
+name = "gtos-session"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+gtos-sys = { path = "../gtos-sys" }
+gtos-widgets = { path = "../gtos-widgets" }
+
+[profile.dev]
+panic = "abort"
+debug = 0
+strip = "symbols"
+
+[profile.release]
+panic = "abort"
+debug = 0
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

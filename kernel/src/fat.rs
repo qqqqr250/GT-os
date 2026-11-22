@@ -3,7 +3,8 @@
 //! Only the root directory is handled and only short (8.3) file names, which is
 //! all the data disk needs. Every cluster is addressed through the first FAT
 //! copy and both copies are kept in step on writes, so the volume stays valid
-//! for other FAT implementations.
+//! for other FAT implementations. Data clusters use a bounded LRU cache with
+//! write-back: dirty bytes are flushed on eviction, `sync`, or close.
 //!
 //! The on-disk structures follow the FAT16 specification: a boot sector, the
 //! reserved sectors, one or more FATs, a fixed-size root directory and then the
@@ -67,10 +68,82 @@ impl Entry {
 /// The volume mounted at boot, if any.
 static MOUNTED: Mutex<Option<Volume>> = Mutex::new(None);
 
+/// One cached data cluster. A dirty entry is newer than the disk and is written
+/// back on eviction, explicit sync or descriptor close. `used` is a monotonic
+/// stamp supporting least-recently-used replacement.
+struct CachedCluster {
+    number: u16,
+    bytes: Vec<u8>,
+    dirty: bool,
+    used: u64,
+}
+
+/// Small LRU data-cluster cache. FAT metadata and root-directory sectors stay
+/// uncached so allocations and directory updates remain immediately visible to
+/// other code.
+struct ClusterCache {
+    entries: Vec<CachedCluster>,
+    tick: u64,
+}
+
+impl ClusterCache {
+    const LINES: usize = 32;
+
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            tick: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.tick = 0;
+    }
+
+    fn position(&self, number: u16) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.number == number)
+    }
+
+    fn touch(&mut self, index: usize) {
+        self.tick = self.tick.wrapping_add(1);
+        self.entries[index].used = self.tick;
+    }
+
+    fn insert(&mut self, number: u16, bytes: &[u8], dirty: bool) {
+        self.tick = self.tick.wrapping_add(1);
+        self.entries.push(CachedCluster {
+            number,
+            bytes: bytes.to_vec(),
+            dirty,
+            used: self.tick,
+        });
+    }
+
+    fn least_recent(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.used)
+            .map(|(index, _)| index)
+    }
+}
+
+static CLUSTER_CACHE: Mutex<ClusterCache> = Mutex::new(ClusterCache::new());
+
+/// Discards cached data for `cluster`, used when a chain is freed or reused.
+fn invalidate_cluster(cluster: u16) {
+    CLUSTER_CACHE
+        .lock()
+        .entries
+        .retain(|entry| entry.number != cluster);
+}
+
 /// Mounts `drive` and remembers the volume for the shell commands.
 ///
 /// Returns `false` when the drive is absent or does not hold a FAT16 volume.
 pub fn mount_data_disk(drive: usize) -> bool {
+    CLUSTER_CACHE.lock().clear();
     match mount(drive) {
         Some(volume) => {
             *MOUNTED.lock() = Some(volume);
@@ -84,6 +157,14 @@ pub fn mount_data_disk(drive: usize) -> bool {
 /// mounted.
 pub fn with_volume<R>(f: impl FnOnce(&Volume) -> R) -> Option<R> {
     MOUNTED.lock().as_ref().map(f)
+}
+
+/// Writes all dirty cached clusters to the mounted FAT volume.
+///
+/// Descriptor writes only mark clusters dirty, so callers that need data to be
+/// stable on disk use this from `fsync` and descriptor close.
+pub fn sync() -> bool {
+    with_volume(Volume::sync_all).unwrap_or(false)
 }
 
 /// Reads the boot sector of `drive` and validates it as FAT16.
@@ -219,6 +300,10 @@ impl Volume {
     }
 
     /// Frees a whole cluster chain.
+    ///
+    /// Cached data for a freed cluster is discarded: the cluster may be
+    /// reallocated with different contents, and flushing stale bytes later would
+    /// corrupt the new owner.
     fn free_chain(&self, mut cluster: u16) -> bool {
         while (FIRST_CLUSTER..0xFFF8).contains(&cluster) {
             let Some(next) = self.read_fat(cluster) else {
@@ -227,6 +312,7 @@ impl Volume {
             if !self.write_fat(cluster, 0) {
                 return false;
             }
+            invalidate_cluster(cluster);
             cluster = next;
         }
         true
@@ -273,7 +359,175 @@ impl Volume {
                 return None;
             }
         }
+        // Reused clusters must start with no cached bytes from their old owner.
+        for &cluster in &found {
+            invalidate_cluster(cluster);
+        }
         Some(found[0])
+    }
+
+    /// Removes the least-recently-used cluster, flushing it first when dirty.
+    fn evict_lru(&self, cache: &mut ClusterCache) -> bool {
+        let Some(victim) = cache.least_recent() else {
+            return false;
+        };
+        if cache.entries[victim].dirty
+            && !ata::write_sectors(
+                self.drive,
+                self.first_sector_of_cluster(cache.entries[victim].number),
+                self.sectors_per_cluster,
+                &cache.entries[victim].bytes,
+            )
+        {
+            return false;
+        }
+        cache.entries.remove(victim);
+        true
+    }
+
+    /// Reads one whole cluster into `buffer`, using the bounded LRU cache first.
+    fn read_cluster(&self, cluster: u16, buffer: &mut [u8]) -> bool {
+        {
+            let mut cache = CLUSTER_CACHE.lock();
+            if let Some(index) = cache.position(cluster) {
+                buffer.copy_from_slice(&cache.entries[index].bytes);
+                cache.touch(index);
+                return true;
+            }
+        }
+        if !ata::read_sectors(
+            self.drive,
+            self.first_sector_of_cluster(cluster),
+            self.sectors_per_cluster,
+            buffer,
+        ) {
+            return false;
+        }
+        // Another task may have filled the same cluster while the ATA read ran.
+        // Prefer that newer cached copy rather than overwriting it.
+        let mut cache = CLUSTER_CACHE.lock();
+        if let Some(index) = cache.position(cluster) {
+            buffer.copy_from_slice(&cache.entries[index].bytes);
+            cache.touch(index);
+        } else {
+            // A clean read may skip caching rather than fail if a dirty victim
+            // cannot be flushed; the caller already has the bytes it asked for.
+            if cache.entries.len() == ClusterCache::LINES && !self.evict_lru(&mut cache) {
+                return true;
+            }
+            cache.insert(cluster, buffer, false);
+        }
+        true
+    }
+
+    /// Writes one whole cluster from `buffer` into the cache.
+    ///
+    /// The bytes reach ATA when this entry is evicted, synced explicitly or
+    /// flushed on descriptor close. That avoids one disk write per small file
+    /// stream write while keeping the cache bounded.
+    fn write_cluster(&self, cluster: u16, buffer: &[u8]) -> bool {
+        let mut cache = CLUSTER_CACHE.lock();
+        if let Some(index) = cache.position(cluster) {
+            let entry = &mut cache.entries[index];
+            if entry.bytes.len() != buffer.len() {
+                return false;
+            }
+            entry.bytes.copy_from_slice(buffer);
+            entry.dirty = true;
+            cache.touch(index);
+            return true;
+        }
+        if cache.entries.len() == ClusterCache::LINES && !self.evict_lru(&mut cache) {
+            return false;
+        }
+        cache.insert(cluster, buffer, true);
+        true
+    }
+
+    /// Writes every dirty cached cluster and then the drive's write cache.
+    fn sync_all(&self) -> bool {
+        {
+            let mut cache = CLUSTER_CACHE.lock();
+            for entry in &mut cache.entries {
+                if entry.dirty
+                    && !ata::write_sectors(
+                        self.drive,
+                        self.first_sector_of_cluster(entry.number),
+                        self.sectors_per_cluster,
+                        &entry.bytes,
+                    )
+                {
+                    return false;
+                }
+                entry.dirty = false;
+            }
+        }
+        ata::flush(self.drive)
+    }
+
+    /// Returns the cluster at a zero-based index in a chain.
+    fn cluster_at(&self, first: u16, index: usize) -> Option<u16> {
+        let mut cluster = first;
+        for _ in 0..index {
+            if !(FIRST_CLUSTER..0xFFF8).contains(&cluster) {
+                return None;
+            }
+            cluster = self.read_fat(cluster)?;
+        }
+        (FIRST_CLUSTER..0xFFF8)
+            .contains(&cluster)
+            .then_some(cluster)
+    }
+
+    /// Counts clusters in a chain, with a bound that also detects cycles.
+    fn chain_len(&self, first: u16) -> usize {
+        let mut cluster = first;
+        let mut count = 0;
+        let limit = usize::try_from(self.cluster_count).unwrap_or(usize::MAX);
+        while (FIRST_CLUSTER..0xFFF8).contains(&cluster) && count < limit {
+            count += 1;
+            match self.read_fat(cluster) {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+        count
+    }
+
+    /// Returns the last cluster in a chain.
+    fn last_cluster(&self, first: u16) -> Option<u16> {
+        let mut cluster = first;
+        let limit = usize::try_from(self.cluster_count).unwrap_or(usize::MAX);
+        for _ in 0..limit {
+            if !(FIRST_CLUSTER..0xFFF8).contains(&cluster) {
+                return None;
+            }
+            let next = self.read_fat(cluster)?;
+            if next >= 0xFFF8 {
+                return Some(cluster);
+            }
+            cluster = next;
+        }
+        None
+    }
+
+    /// Zeros every byte of one cluster.
+    fn zero_cluster(&self, cluster: u16) -> bool {
+        let buffer = alloc::vec![0u8; self.cluster_bytes()];
+        self.write_cluster(cluster, &buffer)
+    }
+
+    /// Zeros a cluster from `from` to its end, preserving the earlier bytes.
+    fn zero_tail(&self, cluster: u16, from: usize) -> bool {
+        let mut buffer = alloc::vec![0u8; self.cluster_bytes()];
+        if from >= buffer.len() {
+            return true;
+        }
+        if !self.read_cluster(cluster, &mut buffer) {
+            return false;
+        }
+        buffer[from..].fill(0);
+        self.write_cluster(cluster, &buffer)
     }
 
     /// Lists the root directory.
@@ -297,6 +551,49 @@ impl Volume {
             }
         }
         entries
+    }
+
+    /// Streams root-directory names into `out` starting at entry `start`.
+    ///
+    /// Returns the number of NUL-terminated bytes written and the next entry
+    /// index. If a name does not fit, no bytes for it are written and the same
+    /// index is returned so the caller can retry with a fresh buffer.
+    pub fn read_dir_chunk(&self, start: usize, out: &mut [u8]) -> Option<(usize, usize)> {
+        let mut index = 0usize;
+        let mut written = 0usize;
+        for sector_index in 0..self.root_sectors {
+            let sector = self.read_root_sector(sector_index)?;
+            for chunk in sector.chunks_exact(DIR_ENTRY) {
+                if chunk[0] == 0x00 {
+                    return Some((written, index));
+                }
+                if chunk[0] == 0xE5
+                    || chunk[11] == ATTR_LONG_NAME
+                    || chunk[11] & ATTR_VOLUME_ID != 0
+                {
+                    continue;
+                }
+                if index < start {
+                    index += 1;
+                    continue;
+                }
+                let name = short_name(&chunk[0..11]);
+                let needed = name.len() + 1;
+                if written + needed > out.len() {
+                    return Some((written, index));
+                }
+                out[written..written + name.len()].copy_from_slice(name.as_bytes());
+                out[written + name.len()] = 0;
+                written += needed;
+                index += 1;
+            }
+        }
+        Some((written, index))
+    }
+
+    /// Returns the directory entry for `name`, if it exists.
+    pub fn metadata(&self, name: &str) -> Option<Entry> {
+        self.find(name).map(|(_, _, entry)| entry)
     }
 
     /// Finds a root-directory entry by name, returning its sector and slot.
@@ -387,6 +684,248 @@ impl Volume {
             cluster = self.read_fat(cluster)?;
         }
         Some(data)
+    }
+
+    /// Reads bytes at `offset` without first loading the whole file.
+    pub fn read_at(&self, name: &str, offset: u64, out: &mut [u8]) -> Option<usize> {
+        let (_, _, entry) = self.find(name)?;
+        if entry.is_directory() || out.is_empty() {
+            return Some(0);
+        }
+        let size = u64::from(entry.size);
+        if offset >= size {
+            return Some(0);
+        }
+        let cluster_bytes = self.cluster_bytes();
+        let cluster_bytes_u64 = u64::try_from(cluster_bytes).ok()?;
+        let index = usize::try_from(offset / cluster_bytes_u64).ok()?;
+        let mut within = usize::try_from(offset % cluster_bytes_u64).ok()?;
+        let mut cluster = self.cluster_at(entry.cluster, index)?;
+        let mut buffer = alloc::vec![0u8; cluster_bytes];
+        let mut copied = 0usize;
+        while copied < out.len() {
+            let wanted = u64::try_from(out.len() - copied).ok()?;
+            let consumed = u64::try_from(copied).ok()?;
+            let remaining = size
+                .saturating_sub(offset.saturating_add(consumed))
+                .min(wanted);
+            if remaining == 0 {
+                break;
+            }
+            let available = u64::try_from(cluster_bytes - within).ok()?;
+            let count = usize::try_from(remaining.min(available)).ok()?;
+            if !self.read_cluster(cluster, &mut buffer) {
+                return None;
+            }
+            out[copied..copied + count].copy_from_slice(&buffer[within..within + count]);
+            copied += count;
+            if copied == out.len() {
+                break;
+            }
+            within = 0;
+            let Some(next) = self.read_fat(cluster) else {
+                break;
+            };
+            cluster = next;
+            if cluster < FIRST_CLUSTER {
+                break;
+            }
+        }
+        Some(copied)
+    }
+
+    /// Grows a file's chain to `needed_clusters`, returning the first cluster.
+    fn extend_chain(&self, first: u16, old_clusters: u32, needed_clusters: u32) -> Option<u16> {
+        if needed_clusters <= old_clusters {
+            return Some(first);
+        }
+        let new_first = self.allocate(needed_clusters - old_clusters)?;
+        if first < FIRST_CLUSTER {
+            return Some(new_first);
+        }
+        let last = self.last_cluster(first)?;
+        self.write_fat(last, new_first).then_some(first)
+    }
+
+    /// Zeros the old partial cluster and every appended cluster after a grow.
+    fn zero_growth(
+        &self,
+        first: u16,
+        old_size: u64,
+        needed_clusters: u32,
+        cluster_bytes: usize,
+    ) -> bool {
+        let Ok(cluster_bytes_u64) = u64::try_from(cluster_bytes) else {
+            return false;
+        };
+        if old_size > 0 {
+            let from = usize::try_from(old_size % cluster_bytes_u64).unwrap_or(0);
+            if from != 0 {
+                let old_count = old_size.div_ceil(cluster_bytes_u64);
+                let Ok(index) = usize::try_from(old_count) else {
+                    return false;
+                };
+                let Some(cluster) = index.checked_sub(1).and_then(|i| self.cluster_at(first, i))
+                else {
+                    return false;
+                };
+                if !self.zero_tail(cluster, from) {
+                    return false;
+                }
+            }
+        }
+        let mut index = old_size.div_ceil(cluster_bytes_u64);
+        while index < u64::from(needed_clusters) {
+            let Ok(offset_index) = usize::try_from(index) else {
+                return false;
+            };
+            let Some(cluster) = self.cluster_at(first, offset_index) else {
+                return false;
+            };
+            if !self.zero_cluster(cluster) {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+
+    /// Writes bytes at `offset`, extending the chain and zero-filling gaps.
+    pub fn write_at(&self, name: &str, offset: u64, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        let Some((sector_index, slot, entry)) = self.find(name) else {
+            return false;
+        };
+        if entry.is_directory() {
+            return false;
+        }
+        let cluster_bytes = self.cluster_bytes();
+        let Ok(cluster_bytes_u64) = u64::try_from(cluster_bytes) else {
+            return false;
+        };
+        let Ok(byte_count) = u64::try_from(bytes.len()) else {
+            return false;
+        };
+        let Some(needed) = offset.checked_add(byte_count) else {
+            return false;
+        };
+        let old_size = u64::from(entry.size);
+        let Ok(needed_clusters) = u32::try_from(needed.div_ceil(cluster_bytes_u64)) else {
+            return false;
+        };
+        let old_clusters = if entry.cluster >= FIRST_CLUSTER {
+            u32::try_from(self.chain_len(entry.cluster)).unwrap_or(u32::MAX)
+        } else {
+            0
+        };
+        let Some(first) = self.extend_chain(entry.cluster, old_clusters, needed_clusters) else {
+            return false;
+        };
+
+        // New clusters come from the free pool without being erased, so a
+        // growing file must zero its old tail and every appended cluster.
+        if needed > old_size && !self.zero_growth(first, old_size, needed_clusters, cluster_bytes) {
+            return false;
+        }
+
+        let Ok(index) = usize::try_from(offset / cluster_bytes_u64) else {
+            return false;
+        };
+        let mut within = usize::try_from(offset % cluster_bytes_u64).unwrap_or(0);
+        let Some(mut cluster) = self.cluster_at(first, index) else {
+            return false;
+        };
+        let mut buffer = alloc::vec![0u8; cluster_bytes];
+        let mut written = 0usize;
+        while written < bytes.len() {
+            if !self.read_cluster(cluster, &mut buffer) {
+                return false;
+            }
+            let count = (cluster_bytes - within).min(bytes.len() - written);
+            buffer[within..within + count].copy_from_slice(&bytes[written..written + count]);
+            if !self.write_cluster(cluster, &buffer) {
+                return false;
+            }
+            written += count;
+            within = 0;
+            if written < bytes.len() {
+                let Some(next) = self.read_fat(cluster) else {
+                    return false;
+                };
+                cluster = next;
+                if cluster < FIRST_CLUSTER {
+                    return false;
+                }
+            }
+        }
+
+        if needed > old_size {
+            let Ok(size) = u32::try_from(needed) else {
+                return false;
+            };
+            if !self.write_entry(sector_index, slot, name, first, size) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Resizes a file in place, reusing its directory slot and cluster chain.
+    pub fn truncate(&self, name: &str, size: u64) -> bool {
+        let Some((sector_index, slot, entry)) = self.find(name) else {
+            return false;
+        };
+        if entry.is_directory() {
+            return false;
+        }
+        let old_size = u64::from(entry.size);
+        if size == old_size {
+            return true;
+        }
+        if size > old_size {
+            // A one-byte zero write extends with zeros and updates the size.
+            return size > 0 && self.write_at(name, size - 1, &[0]);
+        }
+
+        let Ok(new_size) = u32::try_from(size) else {
+            return false;
+        };
+        // Publish the smaller size first: a later cleanup failure can leak
+        // clusters, but it cannot leave a directory entry claiming dead data.
+        if !self.write_entry(sector_index, slot, name, entry.cluster, new_size) {
+            return false;
+        }
+        if size == 0 {
+            return entry.cluster < FIRST_CLUSTER || self.free_chain(entry.cluster);
+        }
+
+        let cluster_bytes = self.cluster_bytes();
+        let Ok(cluster_bytes_u64) = u64::try_from(cluster_bytes) else {
+            return false;
+        };
+        let needed_clusters = usize::try_from(size.div_ceil(cluster_bytes_u64)).unwrap_or(0);
+        let old_clusters = self.chain_len(entry.cluster);
+        let Some(last) = needed_clusters
+            .checked_sub(1)
+            .and_then(|index| self.cluster_at(entry.cluster, index))
+        else {
+            return false;
+        };
+        let within = usize::try_from(size % cluster_bytes_u64).unwrap_or(0);
+        if within != 0 && !self.zero_tail(last, within) {
+            return false;
+        }
+        if needed_clusters < old_clusters {
+            let Some(next) = self.read_fat(last) else {
+                return false;
+            };
+            if next >= FIRST_CLUSTER && (!self.write_fat(last, FAT_END) || !self.free_chain(next)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Creates or replaces a file with `data`.

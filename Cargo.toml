@@ -6,7 +6,7 @@ resolver = "3"
 # what lets `cargo clippy --workspace --all-targets` (which builds for the host)
 # succeed; the artifact dependency below still builds the kernel for the
 # bare-metal target.
-exclude = ["kernel"]
+exclude = ["kernel", "guest"]
 
 [workspace.lints.rust]
 unsafe_code = "warn"

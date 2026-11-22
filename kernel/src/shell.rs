@@ -10,7 +10,7 @@ use bootloader_api::info::{BootInfo, MemoryRegionKind};
 use spin::Mutex;
 
 use crate::console::{print, println};
-use crate::{ata, audio, console, fat, input, interrupts, memory, net, pkg, task, usermode};
+use crate::{ata, audio, console, fat, input, interrupts, memory, net, pkg, task, usermode, vfs};
 
 const PROMPT: &str = "gtos> ";
 const BANNER_WIDTH: usize = 62;
@@ -25,13 +25,15 @@ static HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static HISTORY_CURSOR: Mutex<Option<usize>> = Mutex::new(None);
 /// The half-typed line to restore when browsing past the newest entry.
 static HISTORY_DRAFT: Mutex<String> = Mutex::new(String::new());
+/// The shell's own VFS working directory. Empty means `/`.
+static SHELL_CWD: Mutex<String> = Mutex::new(String::new());
 
 /// Commands offered by Tab. File names are completed separately in [`complete`].
 const COMMAND_NAMES: &[&str] = &[
     "help", "echo", "clear", "mem", "heap", "alloc", "uptime", "cpu", "logo", "about", "net",
-    "dhcp", "ping", "dns", "http", "open", "schemes", "beep", "tone", "disks", "ls", "dir", "cat",
-    "type", "write", "rm", "del", "play", "format", "run", "panic", "reboot", "shutdown",
-    "poweroff", "exit", "pkg",
+    "dhcp", "ping", "dns", "http", "open", "schemes", "cd", "pwd", "stat", "mounts", "beep",
+    "tone", "disks", "ls", "dir", "cat", "type", "write", "rm", "del", "play", "format", "run",
+    "session", "panic", "reboot", "shutdown", "poweroff", "exit", "pkg",
 ];
 
 /// Prints `count` copies of `ch` without allocating.
@@ -181,10 +183,16 @@ pub fn complete(line: &str) -> Option<String> {
     if name_prefix.is_empty() {
         return None;
     }
-    let mut candidates = crate::fm::snapshot()
-        .into_iter()
-        .filter(|item| item.name.starts_with(name_prefix))
-        .map(|item| item.name);
+    let names = crate::fat::with_volume(|volume| {
+        volume
+            .list()
+            .into_iter()
+            .map(|entry| entry.name)
+            .filter(|name| name.starts_with(name_prefix))
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .unwrap_or_default();
+    let mut candidates = names.into_iter();
     let name = candidates.next()?;
     if candidates.next().is_some() {
         return None;
@@ -335,16 +343,21 @@ pub fn execute(line: &str, boot_info: &BootInfo) {
         "http" => http(rest),
         "open" => open_url(rest),
         "schemes" => schemes(),
+        "cd" => cd(rest),
+        "pwd" => pwd(),
+        "stat" => stat_command(rest),
+        "mounts" => mounts(),
         "beep" => beep(),
         "tone" => tone(rest),
         "disks" => disks(),
-        "ls" | "dir" => ls(),
+        "ls" | "dir" => ls(rest),
         "cat" | "type" => cat(rest),
         "write" => write_file(rest),
         "rm" | "del" => rm(rest),
         "play" => play(rest),
         "format" => format_disk(),
         "run" => run_program(rest),
+        "session" => run_program("SESSION.ELF"),
         "panic" => panic!("deliberate panic requested by the shell"),
         "reboot" => reboot(),
         "shutdown" | "poweroff" | "exit" => shutdown(),
@@ -778,14 +791,18 @@ fn help() {
         ("dns <name>", "resolve a host name"),
         ("http <url>", "fetch a page over HTTP"),
         (
-            "open <url>",
-            "read a resource through a scheme (file:/ net:/ sys:/)",
+            "open <url|path>",
+            "read a scheme URL or a VFS path (for example /sys/version)",
         ),
         ("schemes", "list the available schemes and example URLs"),
+        ("cd [path]", "change the shell's VFS working directory"),
+        ("pwd", "print the shell's VFS working directory"),
+        ("stat <path>", "show VFS metadata for a path"),
+        ("mounts", "list VFS mount points"),
         ("beep", "play a short tone through AC'97 audio"),
         ("tone <hz> [ms]", "play a tone of the given frequency"),
         ("disks", "list the ATA drives and their sizes"),
-        ("ls", "list the FAT16 data disk"),
+        ("ls [path]", "list a VFS directory (default: /)"),
         ("cat <file>", "print a file from the data disk"),
         (
             "write <file> [text]",
@@ -799,6 +816,20 @@ fn help() {
             "run a ring-3 program (no file: the built-in demo)",
         ),
         ("run scheme", "demo the open/read/close syscalls in ring 3"),
+        ("run fork", "demo fork/yield/waitpid with two processes"),
+        (
+            "run preempt",
+            "demo PIT preemption between two ring-3 processes",
+        ),
+        (
+            "run sleep",
+            "demo timer-driven sleep with two ring-3 processes",
+        ),
+        ("run exec", "demo replacing the current ring-3 image"),
+        (
+            "session",
+            "start the ring-3 session manager from SESSION.ELF",
+        ),
         ("panic", "trigger a kernel panic (for testing)"),
         ("reboot", "reboot the machine"),
         ("shutdown", "halt the machine"),
@@ -1110,10 +1141,11 @@ fn dns(rest: &str) {
 /// `open <url>`: reads any scheme resource and prints its text.
 fn open_url(rest: &str) {
     if rest.is_empty() {
-        error(format_args!("usage: open <url> (try 'schemes')"));
+        error(format_args!("usage: open <url|path> (try 'schemes')"));
         return;
     }
-    match crate::scheme::open(rest) {
+    let target = vfs_resolve(rest).unwrap_or_else(|| String::from(rest));
+    match crate::scheme::open(&target) {
         Ok(resource) => {
             println!("{} [{}]", resource.url, resource.mime);
             for line in resource.text().lines() {
@@ -1121,6 +1153,74 @@ fn open_url(rest: &str) {
             }
         }
         Err(message) => error(format_args!("open: {message}")),
+    }
+}
+
+/// The shell's working directory, with an empty slot treated as `/`.
+fn shell_cwd() -> String {
+    let guard = SHELL_CWD.lock();
+    if guard.is_empty() {
+        String::from("/")
+    } else {
+        guard.clone()
+    }
+}
+
+/// Resolves a shell argument against its current directory.
+fn shell_absolute(rest: &str) -> Result<String, String> {
+    let path = rest.trim();
+    vfs::absolute_path(&shell_cwd(), if path.is_empty() { "/" } else { path })
+}
+
+/// Resolves a shell argument to a scheme URL, falling back to the raw input.
+fn vfs_resolve(rest: &str) -> Option<String> {
+    vfs::resolve(&shell_cwd(), rest.trim()).ok()
+}
+
+fn cd(rest: &str) {
+    let Ok(absolute) = shell_absolute(rest) else {
+        error(format_args!("cd: invalid path"));
+        return;
+    };
+    match vfs::stat_absolute(&absolute) {
+        Ok(info) if info.kind == vfs::KIND_DIR => *SHELL_CWD.lock() = absolute,
+        Ok(_) => error(format_args!("cd: not a directory: {absolute}")),
+        Err(message) => error(format_args!("cd: {message}")),
+    }
+}
+
+fn pwd() {
+    println!("{}", shell_cwd());
+}
+
+fn stat_command(rest: &str) {
+    if rest.trim().is_empty() {
+        error(format_args!("usage: stat <path>"));
+        return;
+    }
+    match shell_absolute(rest)
+        .and_then(|absolute| vfs::stat_absolute(&absolute).map(|info| (absolute, info)))
+    {
+        Ok((absolute, info)) => {
+            let kind = if info.kind == vfs::KIND_DIR {
+                "directory"
+            } else {
+                "file"
+            };
+            let writable = if info.writable == 0 { "ro" } else { "rw" };
+            println!("{absolute}");
+            println!(
+                "  inode {}  {kind}  {} bytes  {writable}",
+                info.inode, info.size
+            );
+        }
+        Err(message) => error(format_args!("stat: {message}")),
+    }
+}
+
+fn mounts() {
+    for row in vfs::mount_table() {
+        println!("{row}");
     }
 }
 
@@ -1247,25 +1347,24 @@ fn disks() {
     }
 }
 
-/// `ls`: lists the root directory of the data disk.
-fn ls() {
-    if !require_volume() {
+/// `ls [path]`: lists a VFS directory, defaulting to the root mount.
+fn ls(rest: &str) {
+    let Ok(absolute) = shell_absolute(rest) else {
+        error(format_args!("ls: invalid path"));
         return;
-    }
-    let entries = fat::with_volume(fat::Volume::list).unwrap_or_default();
-    if entries.is_empty() {
-        println!("(the volume is empty)");
-        return;
-    }
-    println!("{:>10}  name", "size");
-    for entry in &entries {
-        if entry.is_directory() {
-            println!("{:>10}  {}/", "<DIR>", entry.name);
-        } else {
-            println!("{:>10}  {}", entry.size, entry.name);
+    };
+    match vfs::read_dir_absolute(&absolute) {
+        Ok(names) => {
+            if names.is_empty() {
+                println!("(the directory is empty)");
+                return;
+            }
+            for name in names {
+                println!("{name}");
+            }
         }
+        Err(message) => error(format_args!("ls: {message}")),
     }
-    println!("{} entries", entries.len());
 }
 
 /// `cat <file>`: prints a file, mapping control bytes to a visible form.
@@ -1419,9 +1518,10 @@ fn format_disk() {
 // User mode
 // ---------------------------------------------------------------------------
 
-/// `run [file]`: runs a flat ring-3 binary, or the built-in demo program.
+/// `run [file]`: runs a flat/ELF ring-3 binary, or a built-in demo.
 ///
-/// The binary must be linked against the kernel's user base (see
+/// The built-ins are `demo` (no argument), `scheme`, `fork`, `preempt`, `sleep`
+/// and `exec`. A flat binary must be linked against the kernel's user base (see
 /// [`usermode::USER_BASE`]); `HELLO.BIN` on the data disk is one such program.
 fn run_program(name: &str) {
     if !usermode::is_ready() {
@@ -1433,6 +1533,14 @@ fn run_program(name: &str) {
         ("demo program", usermode::demo_program())
     } else if name == "scheme" {
         ("scheme demo", usermode::scheme_demo_program())
+    } else if name == "fork" {
+        ("fork demo", usermode::fork_demo_program())
+    } else if name == "preempt" {
+        ("preemption demo", usermode::preempt_demo_program())
+    } else if name == "sleep" {
+        ("sleep demo", usermode::sleep_demo_program())
+    } else if name == "exec" {
+        ("exec demo", usermode::exec_demo_program())
     } else {
         if !require_volume() {
             return;
@@ -1448,11 +1556,18 @@ fn run_program(name: &str) {
         error(format_args!("{label} is empty"));
         return;
     }
-    if program.len() > usermode::MAX_PROGRAM_BYTES {
+    // Flat binaries live in the legacy 64 KiB code window. ELF images are
+    // mapped segment by segment and have their own, larger limit.
+    let is_elf = program.starts_with(&[0x7f, b'E', b'L', b'F']);
+    let limit = if is_elf {
+        usermode::MAX_ELF_BYTES
+    } else {
+        usermode::MAX_PROGRAM_BYTES
+    };
+    if program.len() > limit {
         error(format_args!(
-            "{label} is {} bytes, the limit is {}",
-            program.len(),
-            usermode::MAX_PROGRAM_BYTES
+            "{label} is {} bytes, the limit is {limit}",
+            program.len()
         ));
         return;
     }

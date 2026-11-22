@@ -50,11 +50,10 @@ interactive shell over the PS/2 keyboard or a serial line.
   `hlt` when none are ready. The keyboard interrupt handler no longer decodes in
   the interrupt: it pushes raw scancodes into a lock-free queue and wakes an async
   task that decodes them into the shared input queue (post-12).
-- **Windows XP-style desktop** – when a framebuffer is available the kernel boots
-  straight into a Luna-blue desktop: a vertical gradient, a taskbar with a green
-  **start** button, draggable windows with blue title bars and close buttons, a
-  Start menu, and a PS/2 mouse-driven arrow pointer. See
-  [Desktop environment](04-desktop.md).
+- **Text console** – GTos has no graphical desktop. The kernel boots straight
+  into the shell, which renders with an 8x8 pixel font on the linear framebuffer
+  (with a VGA text-mode and serial-only fallback). See
+  [Console shell](04-console.md).
 - **Shell** – `help`, `echo`, `clear`, `mem`, `heap`, `alloc`, `uptime`, `cpu`,
   `logo`, `about`, `net`, `dhcp`, `ping`, `dns`, `http`, `beep`, `tone`, `disks`,
   `ls`, `cat`, `write`, `rm`, `play`, `format`, `run`, `pkg`, `panic`, `reboot`,
@@ -73,5 +72,5 @@ interactive shell over the PS/2 keyboard or a serial line.
   call gate, so flat binaries run with hardware isolation. See
   [User mode (ring 3)](05-user-mode.md).
 - **Manual verification** – there is no automated test suite; boot the image in
-  VirtualBox and exercise the desktop, shell, network and audio by hand. See
+  VirtualBox and exercise the shell, network and audio by hand. See
   [Verifying GTos](11-testing.md).

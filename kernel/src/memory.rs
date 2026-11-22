@@ -1,5 +1,5 @@
 //! Heap allocator backed by the largest usable region reported by the
-//! bootloader, plus a paging layer over the active page table.
+//! bootloader, plus a paging layer and physical frame pool.
 //!
 //! The heap ([`init`], [`info`]) is what `kernel_main` uses. Its global allocator
 //! is post-11's [`FixedSizeBlockAllocator`] (see [`crate::allocator`]): a free list
@@ -9,8 +9,13 @@
 //! ([`init_mapper`], [`with_mapper`], [`translate_addr`], [`init_frame_allocator`],
 //! [`map_page`]) is the post-08 surface: it reads `CR3`, walks the four-level
 //! table, and maps pages through an
-//! [`OffsetPageTable`](x86_64::structures::paging::OffsetPageTable) with a frame
-//! allocator over the bootloader's memory map.
+//! [`OffsetPageTable`](x86_64::structures::paging::OffsetPageTable).
+//!
+//! The frame pool is built from every `Usable` region except the heap, so user
+//! pages and page tables come from real physical memory rather than heap blocks.
+//! [`deallocate_frame`] returns a frame to the pool; higher layers such as
+//! [`crate::address_space`] keep their own reference counts and only release the
+//! last owner.
 //!
 //! # One mapper at a time
 //!
@@ -21,6 +26,7 @@
 //! created only by [`init_mapper`] — never from `kernel_main`, where `usermode`
 //! owns the mapping work. No second mapper is ever live.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::allocator::Locked;
@@ -229,15 +235,19 @@ pub fn translate_addr(address: VirtAddr, physical_memory_offset: VirtAddr) -> Op
     Some(frame.start_address() + u64::from(address.page_offset()))
 }
 
-/// A frame allocator that hands out the `Usable` frames of the bootloader's
-/// memory map, one 4 KiB frame at a time.
+/// A pool of free 4 KiB physical frames collected from the bootloader's
+/// `Usable` regions.
+///
+/// Frames are popped from a stack, so allocation and recycling are both O(1).
+/// The heap is excluded explicitly: it lives at the top of the largest usable
+/// region, so handing those frames to user processes would corrupt allocator
+/// metadata.
 pub struct BootInfoFrameAllocator {
-    memory_regions: &'static MemoryRegions,
-    next: usize,
+    free: Vec<PhysFrame>,
 }
 
 impl BootInfoFrameAllocator {
-    /// Creates a frame allocator over `memory_regions`.
+    /// Collects every usable frame outside `excluded` and below the first MiB.
     ///
     /// # Safety
     ///
@@ -245,41 +255,61 @@ impl BootInfoFrameAllocator {
     /// bootloader marks its own allocations, the kernel image and the kernel stack
     /// as [`MemoryRegionKind::Bootloader`], so the `Usable` regions are free.
     #[must_use]
-    pub unsafe fn new(memory_regions: &'static MemoryRegions) -> Self {
-        Self {
-            memory_regions,
-            next: 0,
+    pub unsafe fn new(memory_regions: &MemoryRegions, excluded: (u64, u64)) -> Self {
+        let (excluded_start, excluded_end) = excluded;
+        let mut free = Vec::new();
+        for region in memory_regions.iter() {
+            if region.kind != MemoryRegionKind::Usable {
+                continue;
+            }
+            // Real-mode and BIOS data live below 1 MiB; the bootloader normally
+            // marks them reserved, but skipping the range is cheap and safe.
+            let start = region.start.max(0x0010_0000);
+            let mut address = (start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            while address + PAGE_SIZE <= region.end {
+                let overlaps_heap = address < excluded_end && excluded_start < address + PAGE_SIZE;
+                if !overlaps_heap {
+                    free.push(PhysFrame::containing_address(PhysAddr::new(address)));
+                }
+                address += PAGE_SIZE;
+            }
         }
+        Self { free }
     }
 
-    /// Iterates over every frame in the `Usable` regions, in address order.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        self.memory_regions
-            .iter()
-            .filter(|region| region.kind == MemoryRegionKind::Usable)
-            .flat_map(|region| (region.start..region.end).step_by(PAGE_SIZE as usize))
-            .map(|address| PhysFrame::containing_address(PhysAddr::new(address)))
+    /// Returns a frame to the pool. The caller must own it exclusively.
+    fn deallocate_frame(&mut self, frame: PhysFrame) {
+        self.free.push(frame);
+    }
+
+    /// Number of frames currently available.
+    #[must_use]
+    pub fn available(&self) -> usize {
+        self.free.len()
     }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        self.free.pop()
     }
 }
 
-/// Stores a frame allocator over `memory_regions` for [`allocate_frame`] and
-/// [`map_page`] to use.
+/// Builds the physical frame pool from `memory_regions`.
+///
+/// The heap's physical range is derived from [`HEAP_START`] and the offset, so
+/// the pool never hands out memory owned by the global allocator.
 ///
 /// # Safety
 ///
 /// Every frame marked [`MemoryRegionKind::Usable`] must really be unused, and
 /// `memory_regions` must outlive the kernel.
-pub unsafe fn init_frame_allocator(memory_regions: &'static MemoryRegions) {
-    // SAFETY: forwarded to the caller.
-    let frames = unsafe { BootInfoFrameAllocator::new(memory_regions) };
+pub unsafe fn init_frame_allocator(memory_regions: &'static MemoryRegions, offset: u64) {
+    let heap_start = HEAP_START.load(Ordering::Relaxed).saturating_sub(offset);
+    let heap_end = heap_start.saturating_add(HEAP_SIZE.load(Ordering::Relaxed));
+    // SAFETY: forwarded to the caller, and the heap range was computed from the
+    // region chosen by `init`.
+    let frames = unsafe { BootInfoFrameAllocator::new(memory_regions, (heap_start, heap_end)) };
     *FRAMES.lock() = Some(frames);
 }
 
@@ -295,6 +325,25 @@ pub fn with_frame_allocator<R>(f: impl FnOnce(&mut BootInfoFrameAllocator) -> R)
 pub fn allocate_frame() -> Option<PhysFrame> {
     with_frame_allocator(<BootInfoFrameAllocator as FrameAllocator<Size4KiB>>::allocate_frame)
         .flatten()
+}
+
+/// Returns a frame to the pool.
+///
+/// # Safety
+///
+/// The caller must have exclusive ownership: no page table or live allocation
+/// may still refer to this frame. Higher layers use reference counting to
+/// guarantee that before calling this function.
+pub unsafe fn deallocate_frame(frame: PhysFrame) {
+    if let Some(frames) = FRAMES.lock().as_mut() {
+        frames.deallocate_frame(frame);
+    }
+}
+
+/// Number of physical frames still free, or `None` before initialization.
+#[must_use]
+pub fn free_frame_count() -> Option<usize> {
+    with_frame_allocator(|frames| frames.available())
 }
 
 /// Maps the page containing `virt` to the frame containing `phys`.

@@ -10,7 +10,7 @@ use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::{PrivilegeLevel, VirtAddr};
 
-use crate::{console, input, mouse, serial};
+use crate::{console, input, serial};
 
 /// Frequency of the programmable interval timer interrupt.
 pub const TICK_HZ: u32 = 100;
@@ -25,6 +25,16 @@ const PIC_EOI: u8 = 0x20;
 const PIT_FREQUENCY: u32 = 1_193_182;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// TSC value when the PIT was programmed.
+static TSC_ANCHOR: AtomicU64 = AtomicU64::new(0);
+/// TSC value at the most recent PIT tick.
+static LAST_TICK_TSC: AtomicU64 = AtomicU64::new(0);
+/// Number of TSC ticks in one PIT period, measured on the first tick.
+static TSC_PER_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds in one PIT period.
+const NS_PER_TICK: u64 = 1_000_000_000 / (TICK_HZ as u64);
 
 /// How often the timer handler prints a dot when [`TIMER_DOTS`] is on.
 const DOT_INTERVAL: u64 = 10;
@@ -55,13 +65,29 @@ fn halt_forever() -> ! {
     }
 }
 
+/// Reads the CPU's timestamp counter.
+fn read_tsc() -> u64 {
+    // SAFETY: `rdtsc` only reads a CPU counter and has no memory side effects.
+    unsafe {
+        let low: u32;
+        let high: u32;
+        core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack));
+        (u64::from(high) << 32) | u64::from(low)
+    }
+}
+
 pub fn init() {
     unsafe { remap_pic() };
 
     {
         let mut idt = IDT.lock();
-        idt.divide_error.set_handler_fn(divide_error);
-        idt.invalid_opcode.set_handler_fn(invalid_opcode);
+        // SAFETY: fault stubs build syscall-shaped frames and never return.
+        unsafe {
+            idt.divide_error
+                .set_handler_addr(crate::usermode::fault_divide_error_addr());
+            idt.invalid_opcode
+                .set_handler_addr(crate::usermode::fault_invalid_opcode_addr());
+        }
         idt.breakpoint.set_handler_fn(breakpoint);
         // SAFETY: `usermode::init_gdt` has loaded the TSS, so the IST slot is
         // valid, and no other handler uses it.
@@ -70,10 +96,20 @@ pub fn init() {
                 .set_handler_fn(double_fault)
                 .set_stack_index(crate::usermode::DOUBLE_FAULT_IST_INDEX);
         }
-        idt.general_protection_fault
-            .set_handler_fn(general_protection_fault);
-        idt.page_fault.set_handler_fn(page_fault);
-        idt[PIC1_OFFSET].set_handler_fn(timer_interrupt);
+        unsafe {
+            idt.general_protection_fault
+                .set_handler_addr(crate::usermode::fault_general_protection_addr());
+            idt.page_fault
+                .set_handler_addr(crate::usermode::fault_page_addr());
+        }
+        // SAFETY: `timer_interrupt` is the assembly entry in `usermode.rs`. It
+        // builds the same frame as `syscall_interrupt`, acknowledges the PIC and
+        // either returns with `iretq` or switches to another process.
+        unsafe {
+            idt[PIC1_OFFSET]
+                .set_handler_addr(crate::usermode::timer_interrupt_addr())
+                .disable_interrupts(true);
+        }
         idt[PIC1_OFFSET + 1].set_handler_fn(keyboard_interrupt);
         idt[PIC1_OFFSET + 4].set_handler_fn(serial_interrupt);
         idt[PIC2_OFFSET + 4].set_handler_fn(mouse_interrupt);
@@ -83,19 +119,23 @@ pub fn init() {
         unsafe { idt.load_unsafe() };
     }
 
+    // Anchor the interpolated clock just before the first PIT tick can fire.
+    let anchor = read_tsc();
+    TSC_ANCHOR.store(anchor, Ordering::Relaxed);
+    LAST_TICK_TSC.store(anchor, Ordering::Relaxed);
+
     unsafe {
         let divisor = PIT_FREQUENCY / TICK_HZ;
         outb(0x43, 0x36); // channel 0, lo/hi byte, square wave generator
         outb(0x40, (divisor & 0xff) as u8);
         outb(0x40, ((divisor >> 8) & 0xff) as u8);
 
-        // Unmask IRQ0 (timer), IRQ1 (keyboard), IRQ2 (slave PIC cascade),
-        // IRQ4 (COM1) on the master PIC, and IRQ12 (mouse) on the slave PIC.
-        // In the 8259 IMR a set bit *masks* the line.
+        // Unmask IRQ0 (timer), IRQ1 (keyboard), IRQ2 (slave PIC cascade) and
+        // IRQ4 (COM1) on the master PIC. On the slave, unmask IRQ4, which is
+        // the aux mouse line (IRQ12). In the 8259 IMR a set bit *masks* the line.
         let unmasked: u8 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 4);
         outb(PIC1_DATA, !unmasked);
-        // Slave PIC: unmask IRQ12 (slave line 4).
-        outb(PIC2_DATA, !(1 << 4));
+        outb(PIC2_DATA, !(1u8 << 4));
     }
 
     interrupts::enable();
@@ -118,6 +158,27 @@ pub fn breakpoints() -> u64 {
 
 pub fn uptime_seconds() -> u64 {
     ticks() / u64::from(TICK_HZ)
+}
+
+/// Returns a monotonic nanosecond count since the PIT was initialized.
+///
+/// The PIT supplies the coarse 10 ms count; the TSC interpolates within the
+/// current tick. It is calibrated against the first PIT period, so no CPU
+/// frequency needs to be known in advance.
+#[must_use]
+pub fn monotonic_ns() -> u64 {
+    let tick = ticks();
+    let coarse = tick.saturating_mul(NS_PER_TICK);
+    let per_tick = TSC_PER_TICK.load(Ordering::Relaxed);
+    if per_tick == 0 {
+        return coarse;
+    }
+    // Clamp the interpolation to one period: a tick may land between reading
+    // `ticks()` and `read_tsc()`.
+    let elapsed = read_tsc()
+        .saturating_sub(LAST_TICK_TSC.load(Ordering::Relaxed))
+        .min(per_tick);
+    coarse.saturating_add(elapsed.saturating_mul(NS_PER_TICK) / per_tick)
 }
 
 /// Installs `handler` on `vector` as a gate that ring-3 code may invoke.
@@ -180,14 +241,43 @@ fn end_of_interrupt(irq: u8) {
     unsafe { outb(PIC1_COMMAND, PIC_EOI) };
 }
 
-extern "x86-interrupt" fn timer_interrupt(_frame: InterruptStackFrame) {
+/// Called by the assembly PIT handler with a syscall-shaped frame when the tick
+/// interrupted ring 3, or with a null frame when it interrupted ring 0.
+///
+/// # Safety
+///
+/// `frame` must either be null or point at the 20-slot register frame built by
+/// `usermode::timer_interrupt`. The caller must not return to user mode if
+/// [`crate::scheduler::preempt`] switches away, because it resumes with `iretq`.
+pub(crate) extern "C" fn timer_tick(frame: *mut u64) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let tsc = read_tsc();
+    if tick == 1 {
+        // The first interrupt follows one full PIT period, so its TSC delta is
+        // the calibration factor used to interpolate later ticks.
+        let delta = tsc.saturating_sub(TSC_ANCHOR.load(Ordering::Relaxed));
+        if delta > 0 {
+            TSC_PER_TICK.store(delta, Ordering::Relaxed);
+        }
+    }
+    LAST_TICK_TSC.store(tsc, Ordering::Relaxed);
     // A test turns this on to make the handler print through the serial lock,
     // which is what proves the `without_interrupts` fix holds.
     if TIMER_DOTS.load(Ordering::Relaxed) && tick % DOT_INTERVAL == 0 {
         serial::print_args(format_args!("."));
     }
     end_of_interrupt(0);
+    crate::process::wake_sleepers(tick);
+    if !frame.is_null() {
+        // SAFETY: the frame was built by `timer_interrupt` and is live on the
+        // current process's private kernel stack.
+        unsafe {
+            if let Some(status) = crate::usermode::deliver_pending_signal(frame) {
+                crate::usermode::terminate_current(frame, status);
+            }
+            crate::scheduler::preempt(frame);
+        }
+    }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
@@ -198,59 +288,74 @@ extern "x86-interrupt" fn keyboard_interrupt(_frame: InterruptStackFrame) {
     end_of_interrupt(1);
 }
 
+extern "x86-interrupt" fn mouse_interrupt(_frame: InterruptStackFrame) {
+    // The 8042 shares data port 0x60 with the keyboard, but the source of this
+    // interrupt is the auxiliary device, so the byte belongs to the mouse.
+    let byte = unsafe { Port::<u8>::new(0x60).read() };
+    crate::mouse::handle_byte(byte);
+    // IRQ12 comes from the slave PIC, so `end_of_interrupt` acknowledges both.
+    end_of_interrupt(12);
+}
+
 extern "x86-interrupt" fn serial_interrupt(_frame: InterruptStackFrame) {
     // Read directly from the UART here: taking the serial mutex in interrupt
     // context could deadlock against a print in progress on the main thread.
     while let Some(byte) = serial::read_byte_irq() {
-        input::push(byte);
+        input::push_serial(byte);
         input::note_serial();
     }
     end_of_interrupt(4);
 }
 
-extern "x86-interrupt" fn mouse_interrupt(_frame: InterruptStackFrame) {
-    let byte: u8 = unsafe { Port::<u8>::new(0x60).read() };
-    mouse::handle_byte(byte);
-    end_of_interrupt(12);
+fn fault_from_user(frame: *const u64) -> bool {
+    // SAFETY: fault stubs build a 20-slot frame: CPU CS is slot 16.
+    let cs = unsafe { *frame.add(16) };
+    (cs & 0b11) == 3
 }
 
-fn report_exception(
-    name: &str,
-    frame: &InterruptStackFrame,
-    detail: core::fmt::Arguments<'_>,
-) -> ! {
-    // A fault raised in ring 3 is contained: report it and terminate the user
-    // program, handing control back to the shell that launched it.
-    if frame.code_segment.rpl() == PrivilegeLevel::Ring3 {
+fn fault_rip(frame: *const u64) -> u64 {
+    // SAFETY: slot 15 is RIP in the syscall/timer/fault frame layout.
+    unsafe { *frame.add(15) }
+}
+
+fn fault_rsp(frame: *const u64) -> u64 {
+    // SAFETY: slot 18 is RSP in the syscall/timer/fault frame layout.
+    unsafe { *frame.add(18) }
+}
+
+fn handle_fault(frame: *mut u64, name: &str, signum: u8, detail: core::fmt::Arguments<'_>) -> ! {
+    let rip = fault_rip(frame);
+    let rsp = fault_rsp(frame);
+    if fault_from_user(frame) {
         crate::console::panic_print(format_args!(
-            "\n[user-mode {name}] {detail}\n  rip: {:#018x}\n  program terminated\n",
-            frame.instruction_pointer.as_u64(),
+            "\n[user-mode {name}] {detail}\n  rip: {rip:#018x}\n  signal: {signum}\n",
         ));
-        crate::usermode::abort(-1);
+        crate::usermode::handle_user_fault(frame, signum);
     }
 
     console::panic_print(format_args!(
-        "\n*** CPU EXCEPTION: {name} ***\n  {detail}\n  rip: {:#018x}\n  rsp: {:#018x}\n",
-        frame.instruction_pointer.as_u64(),
-        frame.stack_pointer.as_u64(),
+        "\n*** CPU EXCEPTION: {name} ***\n  {detail}\n  rip: {rip:#018x}\n  rsp: {rsp:#018x}\n",
     ));
     halt_forever();
 }
 
-extern "x86-interrupt" fn divide_error(frame: InterruptStackFrame) {
-    report_exception(
+/// Assembly fault stubs call these with a syscall-shaped frame.
+pub(crate) extern "C" fn divide_error_fault(frame: *mut u64, _error: u64) -> ! {
+    handle_fault(
+        frame,
         "divide error",
-        &frame,
+        crate::signal::SIGFPE,
         format_args!("the CPU tried to divide by zero"),
-    );
+    )
 }
 
-extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
-    report_exception(
+pub(crate) extern "C" fn invalid_opcode_fault(frame: *mut u64, _error: u64) -> ! {
+    handle_fault(
+        frame,
         "invalid opcode",
-        &frame,
+        crate::signal::SIGILL,
         format_args!("the CPU hit an undefined instruction"),
-    );
+    )
 }
 
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
@@ -263,26 +368,41 @@ extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, error_code: u64) -> ! {
-    report_exception(
-        "double fault",
-        &frame,
-        format_args!("error code: {error_code:#x}"),
-    )
+    console::panic_print(format_args!(
+        "\n*** CPU EXCEPTION: double fault ***\n  error code: {error_code:#x}\n  rip: {:#018x}\n  rsp: {:#018x}\n",
+        frame.instruction_pointer.as_u64(),
+        frame.stack_pointer.as_u64(),
+    ));
+    halt_forever();
 }
 
-extern "x86-interrupt" fn general_protection_fault(frame: InterruptStackFrame, error_code: u64) {
-    report_exception(
+pub(crate) extern "C" fn general_protection_fault_handler(frame: *mut u64, error_code: u64) -> ! {
+    handle_fault(
+        frame,
         "general protection fault",
-        &frame,
+        crate::signal::SIGBUS,
         format_args!("error code: {error_code:#x}"),
     )
 }
 
-extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
+pub(crate) extern "C" fn page_fault_handler(frame: *mut u64, error_code: u64) -> ! {
     let address = Cr2::read().map_or(0, x86_64::VirtAddr::as_u64);
-    report_exception(
+    let error = PageFaultErrorCode::from_bits_truncate(error_code);
+    let from_user = fault_from_user(frame);
+    if from_user
+        && error.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && crate::usermode::handle_cow_fault(address)
+    {
+        // SAFETY: the fault frame is live and the kernel has resolved the COW page.
+        unsafe { crate::usermode::resume_fault_frame(frame) }
+    }
+    // User page faults map to SIGSEGV; protection/key faults are reported as
+    // SIGSEGV too because GTos does not model bus-fault address classes yet.
+    let signum = crate::signal::SIGSEGV;
+    handle_fault(
+        frame,
         "page fault",
-        &frame,
-        format_args!("address: {address:#018x}, error: {error_code:?}"),
+        signum,
+        format_args!("address: {address:#018x}, error: {error:?}"),
     )
 }

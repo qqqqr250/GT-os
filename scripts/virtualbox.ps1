@@ -97,8 +97,8 @@ Invoke-Vbm @('storageattach', $VmName, '--storagectl', 'IDE',
 
 Write-Host ''
 Write-Host "VM '$VmName' is ready. BIOS image: $($bios.FullName)"
-Write-Host 'Mouse: click inside the VM window once to capture the pointer.'
-Write-Host 'F2 opens the file manager; click a row twice (or press Enter) to open it.'
+Write-Host 'Keyboard: click inside the VM window once so VirtualBox captures input.'
+Write-Host 'GTos boots straight to the text shell; type help to list commands.'
 
 if ($Start) {
     Invoke-Vbm @('startvm', $VmName)

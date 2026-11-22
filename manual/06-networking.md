@@ -61,29 +61,9 @@ implements the virtual host locally. Off-subnet traffic is sent to the gateway's
 MAC while keeping the real destination in the IP header, because the NAT engine
 only answers ARP for the addresses it owns.
 
-The Windows XP-style **Browser** window opens from the desktop icon or with
-**F1**. It has an editable address bar: type a URL, press **Enter** (or click
-**Go**) and it fetches the page with `net::fetch_url`. Inspired by the
-[Servo](https://github.com/servo/servo) engine's DOM → CSS cascade → layout →
-display-list pipeline (but written from scratch for `no_std`; no Servo source is
-vendored), `kernel/src/browser.rs` then lays the HTML out as a styled page:
-headings are larger and bold, links are
-blue and underlined, lists get bullets, `<pre>` blocks get a shaded background,
-and images and form controls become labelled placeholders. A small subset of CSS
-(colours, backgrounds, font sizes/weights and text alignment, from both `style`
-attributes and `<style>` blocks) is honoured. The window draws a page viewport
-with a scrollbar and a browser-style status bar. The fetch blocks the UI for its
-duration, then returns to normal; the arrow and Page Up/Down keys scroll the
-rendered page.
-
-Links are real navigation targets: click a link, or press **Tab** to cycle
-through the links and **Enter** to follow the focused one (it is highlighted on
-the page). Relative hrefs are resolved against the current address, and the bar
-is updated with the final URL after redirects. Typing words separated by spaces
-in the address bar performs a Google search, because search-result pages are
-ordinary HTML that this renderer can show. Very large script-only app shells
-(such as `YouTube`) display an honest "This page needs JavaScript" notice rather
-than an empty viewport.
+GTos has no graphical desktop and no browser application. Web access is
+available through the shell's `http` command, which uses the `net::fetch_url`
+stack described below and prints the response body as text.
 
 `fetch_url` accepts `http://`, `https://` and bare `host/path` addresses, follows
 up to five redirects, decodes `Transfer-Encoding: chunked`, and does not ask for
@@ -95,8 +75,7 @@ nor a wall clock, **certificate and hostname checks are disabled**: the
 connection is encrypted against passive observers but is vulnerable to an
 active man-in-the-middle. Treat HTTPS as a pre-alpha experiment, not a secure
 browser. Sites that need TLS 1.2 only, JavaScript, full CSS layout, working
-forms or cookies will still look incomplete or not work properly (script-only
-sites show the notice described above). External CSS,
+forms or cookies will still look incomplete or not work properly. External CSS,
 images and scripts are not fetched separately, so most pages keep their default
 styling rather than the site's own design.
 
@@ -105,5 +84,4 @@ styling rather than the site's own design.
 There is no automated network check. In the VM, run `net` to see the adapter and
 address, then `ping 10.0.2.2` to confirm the NAT gateway answers. With host
 internet access, `dns example.com` and `http http://example.com/` exercise the
-resolver and HTTP client; the **F1** Browser window exercises the same stack
-from the GUI.
+resolver and HTTP client from the shell.

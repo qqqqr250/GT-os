@@ -1,181 +1,200 @@
-//! PS/2 mouse driver: initialises the auxiliary (mouse) port on the 8042
-//! controller, puts the mouse into streaming mode with 3-byte packets, and
-//! exposes the latest pointer state (x, y, buttons).
+//! PS/2 mouse driver for the auxiliary port of the 8042 controller.
+//!
+//! Initialisation puts the mouse into its standard 3-byte streaming packet mode
+//! and enables IRQ12. Each complete packet updates an absolute pointer position
+//! and pushes move/button events into the ring-3 input mirror. The shell does
+//! not consume mouse bytes, so a guest can use the pointer without disturbing
+//! command-line editing.
 
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-/// Mouse state shared between the IRQ handler and the main thread.
-static MOUSE_X: AtomicI32 = AtomicI32::new(400);
-static MOUSE_Y: AtomicI32 = AtomicI32::new(300);
-static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
-
-/// Accumulator for the current 3-byte packet.
-static PACKET: Mutex<[u8; 3]> = Mutex::new([0; 3]);
-static PACKET_IDX: AtomicU8 = AtomicU8::new(0);
+use crate::console;
+use crate::input::{self, Event};
 
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 const COMMAND_PORT: u16 = 0x64;
 
-/// Wait until the controller's input buffer is empty (safe to write a command).
+static MOUSE_X: AtomicI32 = AtomicI32::new(0);
+static MOUSE_Y: AtomicI32 = AtomicI32::new(0);
+static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+static PACKET: Mutex<[u8; 3]> = Mutex::new([0; 3]);
+static PACKET_INDEX: AtomicU8 = AtomicU8::new(0);
+
 fn wait_input_clear() {
     for _ in 0..100_000 {
-        let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
+        // SAFETY: reading the controller status port has no side effects.
+        let status = unsafe { Port::<u8>::new(STATUS_PORT).read() };
         if status & 0x02 == 0 {
             return;
         }
     }
 }
 
-/// Wait until the controller has a byte ready for us to read.
 fn wait_output_full() {
     for _ in 0..100_000 {
-        let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
+        // SAFETY: reading the controller status port has no side effects.
+        let status = unsafe { Port::<u8>::new(STATUS_PORT).read() };
         if status & 0x01 != 0 {
             return;
         }
     }
 }
 
-/// Write a byte to the 8042 command register (0x64).
-fn send_command(cmd: u8) {
+fn send_command(command: u8) {
     wait_input_clear();
-    unsafe { Port::<u8>::new(COMMAND_PORT).write(cmd) };
+    // SAFETY: the 8042 command port is a standard x86 I/O port.
+    unsafe { Port::<u8>::new(COMMAND_PORT).write(command) };
 }
 
-/// Write a byte to the 8042 data register (0x60).
 fn write_data(byte: u8) {
     wait_input_clear();
+    // SAFETY: the 8042 data port is a standard x86 I/O port.
     unsafe { Port::<u8>::new(DATA_PORT).write(byte) };
 }
 
-/// Read a byte from the 8042 data register (0x60).
 fn read_data() -> u8 {
     wait_output_full();
+    // SAFETY: the caller waits for the controller's output buffer to fill.
     unsafe { Port::<u8>::new(DATA_PORT).read() }
 }
 
-/// Drain any bytes already sitting in the controller's output buffer.
 fn flush_output() {
     for _ in 0..32 {
-        let status: u8 = unsafe { Port::<u8>::new(STATUS_PORT).read() };
+        // SAFETY: reading the controller status port has no side effects.
+        let status = unsafe { Port::<u8>::new(STATUS_PORT).read() };
         if status & 0x01 == 0 {
             break;
         }
-        let _ = unsafe { Port::<u8>::new(DATA_PORT).read() };
+        let _ = read_data();
     }
 }
 
-/// Send a byte to the *mouse* (prefixing it with the 0xD4 "next byte is for
-/// the auxiliary device" command).
 fn mouse_write(byte: u8) {
-    send_command(0xD4);
+    send_command(0xd4);
     write_data(byte);
 }
 
-/// Read the controller configuration byte (command 0x20).
 fn read_config() -> u8 {
     send_command(0x20);
     read_data()
 }
 
-/// Write the controller configuration byte (command 0x60).
 fn write_config(config: u8) {
     send_command(0x60);
     write_data(config);
 }
 
-/// Initialise the PS/2 mouse.
+fn pointer_event(kind: u32, code: u32, x: i32, y: i32, buttons: u8) {
+    input::push_event(Event {
+        kind,
+        code,
+        modifiers: 0,
+        x,
+        y,
+        value: u32::from(buttons),
+    });
+}
+
+/// Initialises the mouse and centres the pointer in the VBE framebuffer.
 ///
-/// The ordering matters. The mouse interrupt (IRQ12) is deliberately left
-/// masked in the controller configuration while the mouse command/response
-/// handshake runs, so the interrupt handler cannot consume the ACK bytes the
-/// handshake is waiting for. IRQ12 is enabled only once the mouse is streaming.
+/// IRQ12 stays masked in the 8042 configuration until the command handshake is
+/// complete, so its ACK bytes cannot be stolen by the interrupt handler. The PIC
+/// line itself is unmasked later in `interrupts::init`.
 pub fn init() {
-    // Disable both ports while we reconfigure the controller.
-    send_command(0xAD); // disable keyboard port
-    send_command(0xA7); // disable auxiliary (mouse) port
+    let info = console::framebuffer_info();
+    MOUSE_X.store(
+        i32::try_from(info.width / 2).unwrap_or(0),
+        Ordering::Relaxed,
+    );
+    MOUSE_Y.store(
+        i32::try_from(info.height / 2).unwrap_or(0),
+        Ordering::Relaxed,
+    );
+
+    send_command(0xad); // disable keyboard port
+    send_command(0xa7); // disable auxiliary port
     flush_output();
 
-    // Configuration: keep the keyboard interrupt, keep the mouse interrupt
-    // masked for now, and enable the mouse clock (clear bit 5).
     let mut config = read_config();
-    config |= 0x01; // keyboard interrupt (IRQ1)
-    config &= !0x02; // mouse interrupt (IRQ12) stays off during setup
+    config |= 0x01; // keyboard interrupt
+    config &= !0x02; // mouse interrupt stays masked during setup
     config &= !0x20; // mouse clock enabled
     write_config(config);
 
-    // Bring both ports back up.
-    send_command(0xA8); // enable auxiliary port
-    send_command(0xAE); // enable keyboard port
+    send_command(0xa8); // enable auxiliary port
+    send_command(0xae); // enable keyboard port
 
-    // Mouse: load defaults, then enable data reporting.
-    mouse_write(0xF6); // set defaults
+    mouse_write(0xf6); // load default settings
     let _ = read_data(); // ACK
-    mouse_write(0xF4); // enable data reporting
+    mouse_write(0xf4); // enable data reporting
     let _ = read_data(); // ACK
 
-    // Now that the handshake is finished, enable the mouse interrupt. The
-    // mouse is stationary at boot, so this exchange is not disturbed.
     let mut config = read_config();
-    config |= 0x02; // mouse interrupt (IRQ12)
+    config |= 0x02; // enable mouse interrupt now that streaming started
     write_config(config);
 }
 
-/// Called from the IRQ12 handler with a single byte.
+/// Consumes one byte from the auxiliary port, emitting events for full packets.
 pub fn handle_byte(byte: u8) {
-    let idx = PACKET_IDX.load(Ordering::Relaxed);
-
-    // Resynchronise: the first byte of a packet always has bit 3 set. If we are
-    // waiting for the first byte and this one does not, drop it (this is how we
-    // ignore stray ACK bytes the mouse sends in response to commands).
-    if idx == 0 && byte & 0x08 == 0 {
-        return;
+    let index = PACKET_INDEX.load(Ordering::Relaxed);
+    if index == 0 && byte & 0x08 == 0 {
+        return; // resynchronise after stray command responses
     }
 
-    let mut pkt = PACKET.lock();
-    pkt[idx as usize] = byte;
-    let next = idx + 1;
+    let mut packet = PACKET.lock();
+    packet[index as usize] = byte;
+    let next = index + 1;
     if next < 3 {
-        PACKET_IDX.store(next, Ordering::Relaxed);
+        PACKET_INDEX.store(next, Ordering::Relaxed);
         return;
     }
-    PACKET_IDX.store(0, Ordering::Relaxed);
+    PACKET_INDEX.store(0, Ordering::Relaxed);
 
-    let b0 = pkt[0];
-    let dx = pkt[1] as i8 as i32;
-    let dy = pkt[2] as i8 as i32;
-    drop(pkt);
+    let flags = packet[0];
+    let dx = i32::from(packet[1] as i8);
+    let dy = i32::from(packet[2] as i8);
+    drop(packet);
 
-    let x = (MOUSE_X.load(Ordering::Relaxed) + dx).max(0);
-    // The PS/2 Y axis points up; screen coordinates point down.
-    let y = (MOUSE_Y.load(Ordering::Relaxed) - dy).max(0);
-
+    let info = console::framebuffer_info();
+    let max_x = i32::try_from(info.width.saturating_sub(1)).unwrap_or(0);
+    let max_y = i32::try_from(info.height.saturating_sub(1)).unwrap_or(0);
+    let x = (MOUSE_X.load(Ordering::Relaxed) + dx).clamp(0, max_x);
+    // PS/2 Y grows upward; framebuffer Y grows downward.
+    let y = (MOUSE_Y.load(Ordering::Relaxed) - dy).clamp(0, max_y);
     MOUSE_X.store(x, Ordering::Relaxed);
     MOUSE_Y.store(y, Ordering::Relaxed);
-    MOUSE_BUTTONS.store(b0 & 0x07, Ordering::Relaxed);
+
+    let old_buttons = MOUSE_BUTTONS.load(Ordering::Relaxed);
+    let buttons = flags & 0x07;
+    for bit in 0..3u8 {
+        let mask = 1u8 << bit;
+        if old_buttons & mask == buttons & mask {
+            continue;
+        }
+        pointer_event(input::EVENT_MOUSE_BUTTON, u32::from(bit), x, y, buttons);
+    }
+    MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
+
+    if dx != 0 || dy != 0 {
+        pointer_event(input::EVENT_MOUSE_MOVE, 0, x, y, buttons);
+    }
 }
 
-pub fn x() -> i32 {
-    MOUSE_X.load(Ordering::Relaxed)
+/// Current pointer position, used by diagnostics.
+#[must_use]
+pub fn position() -> (i32, i32) {
+    (
+        MOUSE_X.load(Ordering::Relaxed),
+        MOUSE_Y.load(Ordering::Relaxed),
+    )
 }
 
-pub fn y() -> i32 {
-    MOUSE_Y.load(Ordering::Relaxed)
-}
-
+/// Currently held button mask, used by diagnostics.
+#[must_use]
 pub fn buttons() -> u8 {
     MOUSE_BUTTONS.load(Ordering::Relaxed)
-}
-
-pub fn set_bounds(width: i32, height: i32) {
-    // `width`/`height` come from the framebuffer size and are never zero in
-    // practice, but clamp to a valid range without an underflow either way.
-    let x = MOUSE_X.load(Ordering::Relaxed).clamp(0, width.max(1) - 1);
-    let y = MOUSE_Y.load(Ordering::Relaxed).clamp(0, height.max(1) - 1);
-    MOUSE_X.store(x, Ordering::Relaxed);
-    MOUSE_Y.store(y, Ordering::Relaxed);
 }

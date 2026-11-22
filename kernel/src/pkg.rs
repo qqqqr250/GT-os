@@ -494,13 +494,7 @@ pub fn catalog() -> Vec<Package> {
             "About GTos information window",
             builtin(&["base"]),
         ),
-        Package::new(
-            "mycomputer",
-            "1.0",
-            "System information and drives",
-            builtin(&["base"]),
-        ),
-        Package::new("mydocuments", "1.0", "Document browser", builtin(&["base"])),
+        Package::new("mydocuments", "1.0", "File manager", builtin(&["base"])),
         Package::new(
             "browser",
             "1.0",
@@ -547,7 +541,6 @@ pub fn catalog() -> Vec<Package> {
                 "base",
                 "terminal",
                 "about",
-                "mycomputer",
                 "mydocuments",
                 "browser",
                 "cmd",
@@ -561,29 +554,13 @@ pub fn catalog() -> Vec<Package> {
 pub fn initial_state() -> PackageState {
     let mut state = PackageState::default();
     let catalog = catalog();
-    for name in [
-        "base",
-        "terminal",
-        "about",
-        "mycomputer",
-        "mydocuments",
-        "browser",
-        "cmd",
-    ] {
+    for name in ["base", "terminal", "about", "mydocuments", "browser", "cmd"] {
         state.protected.insert(PackageName::from_static(name));
     }
-    let defaults: Vec<PackageName> = [
-        "base",
-        "terminal",
-        "about",
-        "mycomputer",
-        "mydocuments",
-        "browser",
-        "cmd",
-    ]
-    .iter()
-    .map(|name| PackageName::from_static(name))
-    .collect();
+    let defaults: Vec<PackageName> = ["base", "terminal", "about", "mydocuments", "browser", "cmd"]
+        .iter()
+        .map(|name| PackageName::from_static(name))
+        .collect();
     // Every name is in the catalog and the graph is acyclic, so this cannot fail.
     let _ = state.install(&catalog, &defaults);
     state

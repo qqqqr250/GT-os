@@ -7,7 +7,7 @@
 | Rust nightly (`x86_64-pc-windows-gnu` host) | `abi_x86_interrupt`, `alloc_error_handler`, Cargo artifact dependencies | yes |
 | `x86_64-unknown-none`, `x86_64-unknown-uefi` targets | kernel and UEFI bootloader | yes |
 | MinGW-w64 (`gcc`, `as`, `dlltool`) | GNU host linker for build scripts | yes (WinLibs via winget) |
-| Oracle VirtualBox 7+ | running the images with a real PS/2 mouse | no |
+| Oracle VirtualBox 7+ | running the images with a PS/2 keyboard | no |
 | PowerShell 5.1+ | helper scripts | Windows built-in |
 
 The repository pins the toolchain per directory (`rustup override`), so the
@@ -75,6 +75,11 @@ prints those paths when the build finishes.
 | `logo` | redraw the GT logo and banner |
 | `about` | what this OS is |
 | `net` | show the adapter, address, gateway and DNS server |
+| `open <url\|path>` | read a scheme URL or VFS path such as `/sys/version` |
+| `schemes` | list built-in and registered schemes |
+| `cd [path]` / `pwd` | change or print the shell's VFS directory |
+| `stat <path>` | show VFS inode, kind, size and permissions |
+| `mounts` | list VFS mount points |
 | `dhcp` | (re)acquire an address from a DHCP server |
 | `ping <ip>` | send an ICMP echo request |
 | `dns <name>` | resolve a host name through the DNS proxy |
@@ -82,13 +87,14 @@ prints those paths when the build finishes.
 | `beep` | play a short tone through AC'97 audio |
 | `tone <hz> [ms]` | play a tone of the given frequency and duration |
 | `disks` | list the ATA drives and their sizes |
-| `ls` / `dir` | list the FAT16 data disk's root directory |
+| `ls [path]` / `dir [path]` | list a VFS directory (default `/`) |
 | `cat <file>` / `type` | print a file from the data disk |
 | `write <file> <text>` | create or overwrite a file (or read lines until `.`) |
 | `rm <file>` | delete a file |
 | `play <file>` | play a WAV file from the data disk through AC'97 |
 | `format` | reformat the FAT16 data disk |
-| `run [file]` | run a flat ring-3 program (no file: the built-in demo) |
+| `run [file]` | run a flat or ELF ring-3 program; `demo`, `scheme`, `fork`, `preempt`, `sleep`, `exec` are built in |
+| `session` | start the ring-3 session manager from `SESSION.ELF` |
 | `pkg [list]` | list packages (installed, auto or available) |
 | `pkg search <text>` | search package names and descriptions |
 | `pkg info <name>` | show metadata, dependencies and reverse dependencies |

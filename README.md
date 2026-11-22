@@ -4,7 +4,7 @@ A small, bootable x86_64 operating system written from scratch in Rust — no
 Linux, no `std`, no libc.
 
 > **Pre-alpha:** GTos is an experimental hobby OS. Expect incomplete features,
-> bugs and breaking changes; it is not ready for daily use. The browser's HTTPS
+> bugs and breaking changes; it is not ready for daily use. The shell's HTTPS
 > support is encrypted but does not verify certificates.
 
 ## The GTos Manual
@@ -20,7 +20,7 @@ The manual lives in [`manual/`](manual/), which is its authoritative source.
 
 **The System**
 
-- [Desktop environment](manual/04-desktop.md)
+- [Console shell (no desktop)](manual/04-console.md)
 - [User mode (ring 3)](manual/05-user-mode.md)
 - [Networking](manual/06-networking.md)
 - [Audio](manual/07-audio.md)
@@ -35,6 +35,8 @@ The manual lives in [`manual/`](manual/), which is its authoritative source.
 - [Testing](manual/11-testing.md)
 - [Troubleshooting](manual/12-troubleshooting.md)
 - [Roadmap](manual/13-roadmap.md)
+- [KDE Plasma port assessment](manual/15-plasma-port.md)
+- [Unix-like kernel rewrite](manual/16-unix-rewrite.md)
 - [License and credits](manual/14-license-and-credits.md)
 
 ## License

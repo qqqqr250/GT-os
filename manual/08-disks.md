@@ -10,8 +10,12 @@ Two drives are attached: the boot image on the primary master (drive 0) and a
 16 MiB data disk on the primary slave (drive 1). `build.rs` creates the data disk
 at the project root as `gtos-data.img` **only if it is missing**, so anything
 you write from inside GTos survives a rebuild. It is seeded once with
-`README.TXT`, a tone (`BEEP.WAV`) and a ring-3 program (`HELLO.BIN`). Delete the
-file and rebuild to regenerate a pristine image.
+`README.TXT`, a tone (`BEEP.WAV`), ring-3 programs (`HELLO.BIN`, `HELLO.ELF`,
+`RUSTDEMO.ELF`, `CABI.ELF`, `SESSION.ELF` and `SERVICE.ELF`), launcher metadata
+(`APPS.TSV`), session autostart metadata (`AUTO.TSV`), runner and KCM registries
+(`RUNNERS.TSV`, `KCMS.TSV`), managed-service metadata (`SERVICES.TSV`) and their
+configuration files (`THEME.KCM`, `CLOCK.KCM`). Delete the file and rebuild to
+regenerate a pristine image.
 
 ```
 gtos> disks

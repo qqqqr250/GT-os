@@ -182,7 +182,9 @@ pub fn tone_wav() -> Vec<u8> {
 
 /// `USER_BASE` from the kernel's `usermode` module. A flat user binary is linked
 /// against this address, so the two constants must agree.
-const USER_BASE: u64 = 0x0000_0080_0000_0000;
+const USER_BASE: u64 = 0x0000_0300_0000_0000;
+/// `ELF_IMAGE_BASE` from the kernel's `elf` module.
+const ELF_IMAGE_BASE: u64 = USER_BASE + 0x0010_0000;
 
 /// A hand-assembled ring-3 program that writes a line and exits, stored on the
 /// data disk as `HELLO.BIN`.
@@ -213,4 +215,61 @@ pub fn hello_bin() -> Vec<u8> {
     assert_eq!(program.len(), MESSAGE_OFFSET);
     program.extend_from_slice(MESSAGE);
     program
+}
+
+/// A hand-assembled static ELF64 program, stored as `HELLO.ELF` on the data
+/// disk. It is deliberately tiny: one `PT_LOAD` segment containing the ELF
+/// headers, a write/exit stub and its message. No section headers are needed by
+/// the kernel's loader.
+pub fn hello_elf() -> Vec<u8> {
+    const ENTRY_OFFSET: usize = 64 + 56;
+    const CODE_LEN: usize = 36;
+    const MESSAGE: &[u8] = b"Hello from HELLO.ELF running in ring 3!\r\n";
+    const MESSAGE_OFFSET: usize = ENTRY_OFFSET + CODE_LEN;
+    const FILE_LEN: usize = MESSAGE_OFFSET + MESSAGE.len();
+
+    let mut file = Vec::with_capacity(FILE_LEN);
+
+    // ELF64 header.
+    file.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1]);
+    file.extend_from_slice(&[0; 9]); // OSABI, ABI version and padding.
+    file.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    file.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+    file.extend_from_slice(&1u32.to_le_bytes()); // EV_CURRENT
+    file.extend_from_slice(&(ELF_IMAGE_BASE + ENTRY_OFFSET as u64).to_le_bytes());
+    file.extend_from_slice(&64u64.to_le_bytes()); // e_phoff
+    file.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
+    file.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    file.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    file.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    file.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    file.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+    file.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    file.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+
+    // One readable/executable PT_LOAD covering the whole file.
+    file.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    file.extend_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+    file.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+    file.extend_from_slice(&ELF_IMAGE_BASE.to_le_bytes()); // p_vaddr
+    file.extend_from_slice(&ELF_IMAGE_BASE.to_le_bytes()); // p_paddr
+    file.extend_from_slice(&(FILE_LEN as u64).to_le_bytes()); // p_filesz
+    file.extend_from_slice(&(FILE_LEN as u64).to_le_bytes()); // p_memsz
+    file.extend_from_slice(&4096u64.to_le_bytes()); // p_align
+
+    assert_eq!(file.len(), ENTRY_OFFSET);
+    file.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    file.extend_from_slice(&[0xbf, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    file.extend_from_slice(&[0x48, 0xbe]); // movabs rsi, message
+    file.extend_from_slice(&(ELF_IMAGE_BASE + MESSAGE_OFFSET as u64).to_le_bytes());
+    file.extend_from_slice(&[0xba]); // mov edx, len
+    file.extend_from_slice(&u32::try_from(MESSAGE.len()).unwrap().to_le_bytes());
+    file.extend_from_slice(&[0xcd, 0x80]); // int 0x80
+    file.extend_from_slice(&[0xb8, 0x00, 0x00, 0x00, 0x00]); // mov eax, 0
+    file.extend_from_slice(&[0x31, 0xff]); // xor edi, edi
+    file.extend_from_slice(&[0xcd, 0x80]); // int 0x80
+    assert_eq!(file.len(), MESSAGE_OFFSET);
+    file.extend_from_slice(MESSAGE);
+    assert_eq!(file.len(), FILE_LEN);
+    file
 }

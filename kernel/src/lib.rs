@@ -28,13 +28,15 @@
 
 extern crate alloc;
 
+mod address_space;
 mod allocator;
 mod ata;
 mod audio;
-mod browser;
+mod compositor;
 mod console;
+mod context;
+mod elf;
 mod fat;
-mod fm;
 mod font;
 mod input;
 mod interrupts;
@@ -47,15 +49,20 @@ mod net;
 mod pci;
 mod pkg;
 mod pkgar;
+mod process;
+mod rtc;
+mod scheduler;
 mod scheme;
 mod serial;
 mod shell;
+mod shm;
+mod signal;
 mod sync;
 mod task;
 mod usermode;
+mod vfs;
 mod vga;
 mod volatile;
-mod wm;
 
 use bootloader_api::BootInfo;
 
@@ -159,15 +166,27 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // always finds an initialised scancode queue.
     task::init();
 
-    interrupts::init();
+    // The mouse handshake consumes ACK bytes from port 0x60, so it must finish
+    // before IRQ1/IRQ12 are unmasked by `interrupts::init`.
     mouse::init();
+
+    interrupts::init();
     shell::status(
         true,
         format_args!(
-            "IDT, PIC and PIT loaded; timer at {} Hz, keyboard + COM1 IRQs live",
+            "IDT, PIC and PIT loaded; timer at {} Hz, keyboard + mouse + COM1 IRQs live",
             interrupts::TICK_HZ
         ),
     );
+
+    // SAFETY: `boot_info.memory_regions` is 'static and the bootloader marks
+    // every frame marked Usable as free. The pool excludes the heap reserved by
+    // `memory::init` above.
+    unsafe { memory::init_frame_allocator(&boot_info.memory_regions, physical_memory_offset) };
+
+    // Cache the battery-backed wall clock once. Later reads can use the cached
+    // value if the CMOS registers are unavailable.
+    let _ = rtc::unix_seconds();
 
     init_usermode(physical_memory_offset);
     init_network(physical_memory_offset);
@@ -177,19 +196,15 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Expose the boot state through the Redox-style `sys:` scheme. `file:` and
     // `net:` need no setup beyond the mounted disk and initialised NIC above.
     scheme::init(boot_info);
+    vfs::init();
     shell::status(
         true,
-        format_args!("scheme namespace ready (file:/ net:/ sys:/)"),
+        format_args!("scheme namespace ready (file:/ net:/ sys:/), VFS mounted at /"),
     );
 
-    // If a framebuffer is available, launch the Windows XP-style desktop. It
-    // runs until a byte arrives on COM1, which hands the console to the serial
-    // shell (so a headless test can still drive the shell); without a
-    // framebuffer the shell starts straight away.
-    if let Some(info) = fb_info {
-        wm::init(info.width, info.height, boot_info);
-        wm::run();
-    }
+    // Boot straight into the text shell. The console renders on the framebuffer
+    // when one is available (or on the VGA text console / serial otherwise), so
+    // there is no separate GUI desktop to start.
     shell::run(boot_info)
 }
 
@@ -197,10 +212,11 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 /// stack, and the `int 0x80` system-call gate.
 fn init_usermode(physical_memory_offset: u64) {
     usermode::init(physical_memory_offset);
+    address_space::init(physical_memory_offset);
     shell::status(
         true,
         format_args!(
-            "ring 3 ready: user window at {:#018x}, int 0x80 syscalls enabled",
+            "ring 3 ready: per-process spaces at {:#018x}, int 0x80 syscalls enabled",
             usermode::USER_BASE
         ),
     );

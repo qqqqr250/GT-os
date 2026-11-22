@@ -1,5 +1,7 @@
 /target
 /kernel/target
+/guest/target
+/guest/*/target
 /serial.log
 /*.ppm
 /*.png
@@ -8,4 +10,5 @@
 /*.iso
 /*.vdi
 /*.img
+/*.seed
 /audio.wav

@@ -45,11 +45,10 @@ bootloader needs its VBE services.
 
 **Serial input seems dead.** Verify you are connected to COM1 *after* the boot
 log starts; bytes sent while the guest's UART FIFO is unconfigured can be lost.
-Remember that the first byte also hands the desktop over to the shell, and the
-shell then reads it as its first input: send a bare Enter, which the shell treats
-as an empty line.
+The shell is already running at boot, so the first byte you send is read as shell
+input: a bare Enter is treated as an empty line.
 
-**The desktop cursor does not move.** VirtualBox only forwards mouse motion
-once the VM has captured the pointer: click once inside the VM window, then move
-the mouse (the **Host key**, right Ctrl by default, releases the pointer). The
-PS/2 driver itself needs no host-side configuration.
+**Keyboard input seems dead in the VM.** VirtualBox only forwards key presses
+once the guest has captured the keyboard: click once inside the VM window, then
+type (the **Host key**, right Ctrl by default, releases it). The shell ignores the
+mouse, but guest programs can read pointer events from the `input` device.
