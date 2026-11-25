@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use gtos_sys::{InputEvent, InputPoll, WindowCreate, WindowDamage};
+use gtos_sys::{FdSet, InputEvent, InputPoll, PollFd, WindowCreate, WindowDamage};
 use gtos_widgets::shell::{
     DesktopShell, LauncherEntry, LauncherRecord, ShellAction, ShellFocus, ShellLayout,
     ShellSessionAction, TrayAction, TrayItem, parse_launcher_records,
@@ -62,6 +62,22 @@ const FAULT_SIGNAL_OK: &[u8] = b"fault signal ok\r\n";
 const FAULT_SIGNAL_FAIL: &[u8] = b"fault signal failed\r\n";
 const RT_SIGNAL_OK: &[u8] = b"rt signal queue ok\r\n";
 const RT_SIGNAL_FAIL: &[u8] = b"rt signal queue failed\r\n";
+const SIGNAL_WAIT_OK: &[u8] = b"signal wait ok\r\n";
+const SIGNAL_WAIT_FAIL: &[u8] = b"signal wait failed\r\n";
+const SIGNALFD_OK: &[u8] = b"signalfd read ok\r\n";
+const SIGNALFD_FAIL: &[u8] = b"signalfd read failed\r\n";
+const POLL_OK: &[u8] = b"poll multiplex ok\r\n";
+const POLL_FAIL: &[u8] = b"poll multiplex failed\r\n";
+const SELECT_OK: &[u8] = b"select multiplex ok\r\n";
+const SELECT_FAIL: &[u8] = b"select multiplex failed\r\n";
+const READINESS_WAKE_OK: &[u8] = b"readiness wake ok\r\n";
+const READINESS_WAKE_FAIL: &[u8] = b"readiness wake failed\r\n";
+const BLOCKING_READ_OK: &[u8] = b"blocking read wake ok\r\n";
+const BLOCKING_READ_FAIL: &[u8] = b"blocking read wake failed\r\n";
+const BLOCKING_WRITE_OK: &[u8] = b"blocking write wake ok\r\n";
+const BLOCKING_WRITE_FAIL: &[u8] = b"blocking write wake failed\r\n";
+const BLOCKING_WAITPID_OK: &[u8] = b"blocking waitpid wake ok\r\n";
+const BLOCKING_WAITPID_FAIL: &[u8] = b"blocking waitpid wake failed\r\n";
 const SIGNAL_TIMEOUT_MS: u64 = 3_000;
 const HEAP_OK: &[u8] = b"guest allocator ok\r\n";
 const HEAP_FAIL: &[u8] = b"guest allocator failed\r\n";
@@ -109,6 +125,16 @@ const STREAM_OK: &[u8] = b"streaming ipc ok\r\n";
 const STREAM_FAIL: &[u8] = b"streaming ipc failed\r\n";
 const SOCKET_OK: &[u8] = b"socketpair ok\r\n";
 const SOCKET_FAIL: &[u8] = b"socketpair failed\r\n";
+const SOCK_CLOEXEC_OK: &[u8] = b"sock cloexec ok\r\n";
+const SOCK_CLOEXEC_FAIL: &[u8] = b"sock cloexec failed\r\n";
+const SOCKET_CRED_OK: &[u8] = b"socket cred ok\r\n";
+const SOCKET_CRED_FAIL: &[u8] = b"socket cred failed\r\n";
+const PIPE2_OK: &[u8] = b"pipe2 flags ok\r\n";
+const PIPE2_FAIL: &[u8] = b"pipe2 flags failed\r\n";
+const DUP_OK: &[u8] = b"dup ok\r\n";
+const DUP_FAIL: &[u8] = b"dup failed\r\n";
+const CLOEXEC_OK: &[u8] = b"cloexec ok\r\n";
+const CLOEXEC_FAIL: &[u8] = b"cloexec failed\r\n";
 /// One full datagram fills a quarter of the kernel's 4 KiB socket buffer.
 const SOCKET_DATAGRAM_BYTES: usize = 1024;
 const SOCKET_TIMEOUT_MS: u64 = 3_000;
@@ -155,25 +181,32 @@ static mut HANDLER_RAN: bool = false;
 static mut MASKED_HANDLER_RAN: bool = false;
 static mut QUEUED_FIRST_RAN: bool = false;
 static mut QUEUED_SECOND_RAN: bool = false;
-static mut RT_QUEUE_ORDER: [u8; 3] = [0, 0, 0];
-static mut RT_QUEUE_COUNT: usize = 0;
 static mut CHILD_HANDLER_RAN: bool = false;
+const RT_CAPACITY: usize = 8;
+static mut RT_VALUES: [u64; RT_CAPACITY] = [0; RT_CAPACITY];
+static mut RT_SIGNOS: [u64; RT_CAPACITY] = [0; RT_CAPACITY];
+static mut RT_COUNT: usize = 0;
+static mut RT_INFO_OK: bool = true;
 
-extern "C" fn on_signal(_signum: u64, frame: *mut u64) -> ! {
+extern "C" fn on_signal(_signum: u64, frame: *mut u64, _info: *const gtos_sys::Siginfo) -> ! {
     // SAFETY: the handler and main never run at the same time.
     unsafe { HANDLER_RAN = true };
     let _ = gtos_sys::write(1, SIGNAL_HIT);
     gtos_sys::sigreturn(frame)
 }
 
-extern "C" fn on_masked_signal(_signum: u64, frame: *mut u64) -> ! {
+extern "C" fn on_masked_signal(
+    _signum: u64,
+    frame: *mut u64,
+    _info: *const gtos_sys::Siginfo,
+) -> ! {
     // SAFETY: the handler and main never run at the same time.
     unsafe { MASKED_HANDLER_RAN = true };
     let _ = gtos_sys::write(1, MASKED_HIT);
     gtos_sys::sigreturn(frame)
 }
 
-extern "C" fn on_queued_first(_signum: u64, frame: *mut u64) -> ! {
+extern "C" fn on_queued_first(_signum: u64, frame: *mut u64, _info: *const gtos_sys::Siginfo) -> ! {
     // SAFETY: the handler and main never run at the same time.
     unsafe { QUEUED_FIRST_RAN = true };
     let _ = gtos_sys::write(1, QUEUED_FIRST_HIT);
@@ -183,41 +216,55 @@ extern "C" fn on_queued_first(_signum: u64, frame: *mut u64) -> ! {
     gtos_sys::sigreturn(frame)
 }
 
-extern "C" fn on_queued_second(_signum: u64, frame: *mut u64) -> ! {
+extern "C" fn on_queued_second(
+    _signum: u64,
+    frame: *mut u64,
+    _info: *const gtos_sys::Siginfo,
+) -> ! {
     // SAFETY: the handler and main never run at the same time.
     unsafe { QUEUED_SECOND_RAN = true };
     let _ = gtos_sys::write(1, QUEUED_SECOND_HIT);
     gtos_sys::sigreturn(frame)
 }
 
-extern "C" fn on_rt_signal(signum: u64, frame: *mut u64) -> ! {
-    // SAFETY: handler and main never run at the same time.
-    unsafe {
-        let count = (&raw const RT_QUEUE_COUNT).read();
-        let max = (&raw const RT_QUEUE_ORDER).read().len();
-        if count < max {
-            let Ok(signum) = u8::try_from(signum) else {
-                gtos_sys::sigreturn(frame);
-            };
-            (&raw mut RT_QUEUE_ORDER)
-                .cast::<u8>()
-                .add(count)
-                .write(signum);
-            (&raw mut RT_QUEUE_COUNT).write(count + 1);
-        }
-    }
-    gtos_sys::sigreturn(frame)
-}
-
-extern "C" fn on_child_signal(_signum: u64, frame: *mut u64) -> ! {
+extern "C" fn on_child_signal(_signum: u64, frame: *mut u64, _info: *const gtos_sys::Siginfo) -> ! {
     // SAFETY: the child handler and the child's main never run together.
     unsafe { CHILD_HANDLER_RAN = true };
     let _ = gtos_sys::write(1, CHILD_HIT);
     gtos_sys::sigreturn(frame)
 }
 
-extern "C" fn on_fault_signal(_signum: u64, _frame: *mut u64) -> ! {
+extern "C" fn on_fault_signal(
+    _signum: u64,
+    _frame: *mut u64,
+    _info: *const gtos_sys::Siginfo,
+) -> ! {
     gtos_sys::exit(0);
+}
+
+extern "C" fn on_rt_signal(signum: u64, frame: *mut u64, info: *const gtos_sys::Siginfo) -> ! {
+    // SAFETY: the guest is single-threaded and handlers never overlap.
+    unsafe {
+        if info.is_null() {
+            RT_INFO_OK = false;
+        } else {
+            let info = &*info;
+            if info.si_signo != signum
+                || info.si_code != gtos_sys::SI_QUEUE
+                || info.si_pid != gtos_sys::getpid()
+            {
+                RT_INFO_OK = false;
+            }
+            if RT_COUNT < RT_CAPACITY {
+                RT_SIGNOS[RT_COUNT] = signum;
+                RT_VALUES[RT_COUNT] = info.si_value;
+                RT_COUNT += 1;
+            } else {
+                RT_INFO_OK = false;
+            }
+        }
+    }
+    gtos_sys::sigreturn(frame)
 }
 
 fn signal_ok() -> bool {
@@ -238,7 +285,7 @@ fn signal_mask_ok() -> bool {
         return false;
     }
     let bit = gtos_sys::signal_bit(gtos_sys::SIGUSR1);
-    let mut old = 1u64;
+    let mut old = 0u64;
     if gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&bit), Some(&mut old)) == gtos_sys::ERROR
         || old != 0
     {
@@ -278,33 +325,790 @@ fn signal_ignore_ok() -> bool {
 }
 
 fn rt_signal_queue_ok() -> bool {
-    // SAFETY: single-threaded guest, handlers do not overlap main.
+    // Real-time signals must survive repeated sends in FIFO order and carry
+    // their `sigqueue` value through the handler's `siginfo` argument.
+    let first = gtos_sys::SIGRTMIN;
+    let second = gtos_sys::SIGRTMIN + 1;
+    let mask = gtos_sys::signal_bit(first) | gtos_sys::signal_bit(second);
+    let mut old = 0u64;
+
+    // SAFETY: the guest is single-threaded and no handler is running.
     unsafe {
-        RT_QUEUE_ORDER = [0, 0, 0];
-        RT_QUEUE_COUNT = 0;
+        RT_COUNT = 0;
+        RT_INFO_OK = true;
     }
-    let rt1 = gtos_sys::SIGRTMIN;
-    let rt2 = gtos_sys::SIGRTMIN + 1;
-    if gtos_sys::signal(rt1, on_rt_signal) == gtos_sys::ERROR
-        || gtos_sys::signal(rt2, on_rt_signal) == gtos_sys::ERROR
+    if gtos_sys::signal(first, on_rt_signal) == gtos_sys::ERROR
+        || gtos_sys::signal(second, on_rt_signal) == gtos_sys::ERROR
     {
         return false;
     }
-    let mask = gtos_sys::signal_bit(rt1) | gtos_sys::signal_bit(rt2);
-    let mut old = 0u64;
     if gtos_sys::sigprocmask(gtos_sys::SIG_BLOCK, Some(&mask), Some(&mut old)) == gtos_sys::ERROR {
+        let _ = gtos_sys::signal_disposition(first, gtos_sys::SIG_DFL);
+        let _ = gtos_sys::signal_disposition(second, gtos_sys::SIG_DFL);
         return false;
     }
-    let ok = gtos_sys::kill(gtos_sys::getpid(), rt2) != gtos_sys::ERROR
-        && gtos_sys::kill(gtos_sys::getpid(), rt1) != gtos_sys::ERROR
-        && gtos_sys::kill(gtos_sys::getpid(), rt1) != gtos_sys::ERROR;
+
+    let pid = gtos_sys::getpid();
+    let sent = gtos_sys::sigqueue(pid, second, 20) == 0
+        && gtos_sys::sigqueue(pid, first, 10) == 0
+        && gtos_sys::sigqueue(pid, first, 30) == 0
+        && gtos_sys::sigqueue(pid, first, 40) == 0;
     let mut pending = 0u64;
     let queued =
-        ok && gtos_sys::sigpending(&mut pending) != gtos_sys::ERROR && pending & mask == mask;
+        sent && gtos_sys::sigpending(&mut pending) != gtos_sys::ERROR && pending & mask == mask;
     let unblocked =
         gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None) != gtos_sys::ERROR;
-    let (order, count) = unsafe { (RT_QUEUE_ORDER, RT_QUEUE_COUNT) };
-    unblocked && queued && count == 3 && order == [rt2, rt1, rt1]
+    let mut cleared = 0u64;
+    let drained =
+        unblocked && gtos_sys::sigpending(&mut cleared) != gtos_sys::ERROR && cleared & mask == 0;
+
+    let _ = gtos_sys::signal_disposition(first, gtos_sys::SIG_DFL);
+    let _ = gtos_sys::signal_disposition(second, gtos_sys::SIG_DFL);
+    if !queued || !drained {
+        return false;
+    }
+
+    // SAFETY: unblocking delivered every queued signal before returning, and the
+    // handler records are only written by that handler. Reading them by value
+    // avoids creating a shared reference to a `static mut`.
+    let (info_ok, count, values, signos) = unsafe {
+        (
+            core::ptr::read(&raw const RT_INFO_OK),
+            core::ptr::read(&raw const RT_COUNT),
+            core::ptr::read(&raw const RT_VALUES),
+            core::ptr::read(&raw const RT_SIGNOS),
+        )
+    };
+    info_ok
+        && count == 4
+        && values[..4] == [20, 10, 30, 40]
+        && signos[..4]
+            == [
+                u64::from(second),
+                u64::from(first),
+                u64::from(first),
+                u64::from(first),
+            ]
+}
+
+fn signal_wait_ok() -> bool {
+    let signum = gtos_sys::SIGRTMIN + 2;
+    let mask = gtos_sys::signal_bit(signum);
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let parent = gtos_sys::getpid();
+    let mut old = 0u64;
+    if gtos_sys::sigprocmask(gtos_sys::SIG_BLOCK, Some(&mask), Some(&mut old)) == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(read_fd);
+        if gtos_sys::write(write_fd, b"R") != 1 {
+            gtos_sys::exit(1);
+        }
+        // Give the parent time to enter the blocking wait before the send.
+        let _ = gtos_sys::sleep(120);
+        if gtos_sys::sigqueue(parent, signum, 0x5a5a) == gtos_sys::ERROR {
+            gtos_sys::exit(2);
+        }
+        if gtos_sys::write(write_fd, b"D") != 1 {
+            gtos_sys::exit(3);
+        }
+        gtos_sys::exit(0);
+    }
+
+    let _ = gtos_sys::close(write_fd);
+    let ready = wait_for_pipe_byte(read_fd, b'R');
+    let mut info = gtos_sys::Siginfo::default();
+    let waited = ready && gtos_sys::sigwaitinfo(&mask, &mut info) == u64::from(signum);
+    let payload_ok = waited
+        && info.si_signo == u64::from(signum)
+        && info.si_code == gtos_sys::SI_QUEUE
+        && info.si_pid == child
+        && info.si_value == 0x5a5a;
+    let mut pending = 0u64;
+    let consumed =
+        payload_ok && gtos_sys::sigpending(&mut pending) != gtos_sys::ERROR && pending & mask == 0;
+    let mut timeout_info = gtos_sys::Siginfo::default();
+    let timed_out =
+        consumed && gtos_sys::sigtimedwait(&mask, &mut timeout_info, Some(80)) == gtos_sys::ERROR;
+    let done = timed_out && wait_for_pipe_byte(read_fd, b'D');
+    if !done {
+        let _ = gtos_sys::kill(child, gtos_sys::SIGKILL);
+    }
+    let status = wait_for_child(child);
+    let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+    let _ = gtos_sys::close(read_fd);
+    done && status == Some(0)
+}
+
+fn signalfd_ok() -> bool {
+    let signum = gtos_sys::SIGRTMIN + 3;
+    let mask = gtos_sys::signal_bit(signum);
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let parent = gtos_sys::getpid();
+    let mut old = 0u64;
+    if gtos_sys::sigprocmask(gtos_sys::SIG_BLOCK, Some(&mask), Some(&mut old)) == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    let Some(fd) = gtos_sys::signalfd(&mask, 0) else {
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    };
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(fd);
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(fd);
+        if gtos_sys::write(write_fd, b"R") != 1 {
+            gtos_sys::exit(1);
+        }
+        // Give the parent time to enter the blocking descriptor read.
+        let _ = gtos_sys::sleep(120);
+        if gtos_sys::sigqueue(parent, signum, 0x1234) == gtos_sys::ERROR {
+            gtos_sys::exit(2);
+        }
+        if gtos_sys::write(write_fd, b"D") != 1 {
+            gtos_sys::exit(3);
+        }
+        gtos_sys::exit(0);
+    }
+
+    let _ = gtos_sys::close(write_fd);
+    let ready = wait_for_pipe_byte(read_fd, b'R');
+    let mut info = gtos_sys::Siginfo::default();
+    let count = if ready {
+        gtos_sys::signalfd_read(fd, &mut info)
+    } else {
+        gtos_sys::ERROR
+    };
+    let payload_ok = count == core::mem::size_of::<gtos_sys::Siginfo>() as u64
+        && info.si_signo == u64::from(signum)
+        && info.si_code == gtos_sys::SI_QUEUE
+        && info.si_pid == child
+        && info.si_value == 0x1234;
+    let mut pending = 0u64;
+    let consumed =
+        payload_ok && gtos_sys::sigpending(&mut pending) != gtos_sys::ERROR && pending & mask == 0;
+    let flags_ok = consumed
+        && gtos_sys::fcntl(fd, gtos_sys::F_SETFL, gtos_sys::O_NONBLOCK) == 0
+        && gtos_sys::fcntl(fd, gtos_sys::F_GETFL, 0) == gtos_sys::O_NONBLOCK;
+    let mut empty = gtos_sys::Siginfo::default();
+    let empty_read = flags_ok && gtos_sys::signalfd_read(fd, &mut empty) == gtos_sys::ERROR;
+    let done = empty_read && wait_for_pipe_byte(read_fd, b'D');
+    if !done {
+        let _ = gtos_sys::kill(child, gtos_sys::SIGKILL);
+    }
+    let status = wait_for_child(child);
+    let _ = gtos_sys::close(fd);
+    let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+    let _ = gtos_sys::close(read_fd);
+    done && status == Some(0)
+}
+
+/// Descriptors used by the descriptor-multiplexing test.
+struct PollFds {
+    ctrl_r: u64,
+    ctrl_w: u64,
+    pipe_r: u64,
+    pipe_w: u64,
+    sock_a: u64,
+    sock_b: u64,
+    sigfd: u64,
+}
+
+impl PollFds {
+    fn close_all(&self) {
+        let _ = gtos_sys::close(self.sigfd);
+        let _ = gtos_sys::close(self.sock_a);
+        let _ = gtos_sys::close(self.sock_b);
+        let _ = gtos_sys::close(self.pipe_r);
+        let _ = gtos_sys::close(self.pipe_w);
+        let _ = gtos_sys::close(self.ctrl_r);
+        let _ = gtos_sys::close(self.ctrl_w);
+    }
+}
+
+/// Child side of the `poll` test: emit one event of each kind in order.
+fn poll_child(parent: u64, signum: u8, fds: &PollFds) -> ! {
+    let _ = gtos_sys::close(fds.ctrl_r);
+    let _ = gtos_sys::close(fds.pipe_r);
+    let _ = gtos_sys::close(fds.sock_a);
+    let _ = gtos_sys::close(fds.sigfd);
+    if gtos_sys::write(fds.ctrl_w, b"R") != 1 {
+        gtos_sys::exit(1);
+    }
+    // Give the parent time to enter the blocking poll before any event.
+    let _ = gtos_sys::sleep(150);
+    if gtos_sys::write(fds.pipe_w, b"P") != 1 {
+        gtos_sys::exit(2);
+    }
+    if gtos_sys::write(fds.sock_b, b"Q") != 1 {
+        gtos_sys::exit(3);
+    }
+    if gtos_sys::sigqueue(parent, signum, 0x2468) == gtos_sys::ERROR {
+        gtos_sys::exit(4);
+    }
+    if gtos_sys::write(fds.ctrl_w, b"D") != 1 {
+        gtos_sys::exit(5);
+    }
+    gtos_sys::exit(0)
+}
+
+/// Waits until all three descriptor kinds report `POLLIN`.
+fn poll_multiplex(entries: &mut [PollFd; 3], ready: bool) -> bool {
+    let deadline = gtos_sys::uptime().saturating_add(SIGNAL_TIMEOUT_MS);
+    let mut seen = [false; 3];
+    while !(seen[0] && seen[1] && seen[2]) && gtos_sys::uptime() < deadline {
+        let remaining = deadline.saturating_sub(gtos_sys::uptime()).max(1);
+        let count = if ready {
+            gtos_sys::poll(entries, Some(remaining))
+        } else {
+            gtos_sys::ERROR
+        };
+        if count == gtos_sys::ERROR {
+            break;
+        }
+        for (slot, seen) in seen.iter_mut().enumerate() {
+            if entries[slot].revents & gtos_sys::POLLIN != 0 {
+                *seen = true;
+            }
+        }
+        if count == 0 {
+            gtos_sys::yield_now();
+        }
+    }
+    ready && seen[0] && seen[1] && seen[2]
+}
+
+/// Consumes and validates one payload from each multiplexed descriptor.
+fn poll_payloads(fds: &PollFds, child: u64, signum: u8, sigmask: u64) -> bool {
+    let mut byte = 0;
+    let mut datagram = [0u8; 8];
+    let mut info = gtos_sys::Siginfo::default();
+    let pipe_ok = gtos_sys::read(fds.pipe_r, core::slice::from_mut(&mut byte)) == 1 && byte == b'P';
+    let count = if pipe_ok {
+        gtos_sys::read(fds.sock_a, &mut datagram)
+    } else {
+        gtos_sys::ERROR
+    };
+    let socket_ok = pipe_ok && count == 1 && datagram[0] == b'Q';
+    let count = if socket_ok {
+        gtos_sys::signalfd_read(fds.sigfd, &mut info)
+    } else {
+        gtos_sys::ERROR
+    };
+    let signal_ok = socket_ok
+        && count == core::mem::size_of::<gtos_sys::Siginfo>() as u64
+        && info.si_signo == u64::from(signum)
+        && info.si_code == gtos_sys::SI_QUEUE
+        && info.si_pid == child
+        && info.si_value == 0x2468;
+    let mut pending = 0u64;
+    signal_ok
+        && gtos_sys::sigpending(&mut pending) != gtos_sys::ERROR
+        && pending & sigmask == 0
+}
+
+fn poll_ok() -> bool {
+    let signum = gtos_sys::SIGRTMIN + 4;
+    let sigmask = gtos_sys::signal_bit(signum);
+    let parent = gtos_sys::getpid();
+    let Some((ctrl_r, ctrl_w)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let Some((pipe_r, pipe_w)) = gtos_sys::pipe() else {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        return false;
+    };
+    let Some((sock_a, sock_b)) = gtos_sys::socketpair() else {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        return false;
+    };
+    let mut old = 0u64;
+    if gtos_sys::sigprocmask(gtos_sys::SIG_BLOCK, Some(&sigmask), Some(&mut old))
+        == gtos_sys::ERROR
+    {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        let _ = gtos_sys::close(sock_a);
+        let _ = gtos_sys::close(sock_b);
+        return false;
+    }
+    let Some(sigfd) = gtos_sys::signalfd(&sigmask, 0) else {
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        let _ = gtos_sys::close(sock_a);
+        let _ = gtos_sys::close(sock_b);
+        return false;
+    };
+    let fds = PollFds {
+        ctrl_r,
+        ctrl_w,
+        pipe_r,
+        pipe_w,
+        sock_a,
+        sock_b,
+        sigfd,
+    };
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        fds.close_all();
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        return false;
+    }
+    if child == 0 {
+        poll_child(parent, signum, &fds);
+    }
+
+    let ready = wait_for_pipe_byte(fds.ctrl_r, b'R');
+    let mut entries = [
+        PollFd::new(fds.pipe_r, gtos_sys::POLLIN),
+        PollFd::new(fds.sock_a, gtos_sys::POLLIN),
+        PollFd::new(fds.sigfd, gtos_sys::POLLIN),
+    ];
+    let multiplexed = poll_multiplex(&mut entries, ready);
+    let consumed = multiplexed && poll_payloads(&fds, child, signum, sigmask);
+
+    let mut writable = [
+        PollFd::new(fds.pipe_w, gtos_sys::POLLOUT),
+        PollFd::new(fds.sock_b, gtos_sys::POLLOUT),
+    ];
+    let write_ready = consumed
+        && gtos_sys::poll(&mut writable, Some(0)) == 2
+        && writable[0].revents & gtos_sys::POLLOUT != 0
+        && writable[1].revents & gtos_sys::POLLOUT != 0;
+
+    let mut idle = [PollFd::new(fds.pipe_r, gtos_sys::POLLIN)];
+    let started = gtos_sys::uptime();
+    let timed_out = write_ready
+        && gtos_sys::poll(&mut idle, Some(60)) == 0
+        && idle[0].revents == 0
+        && gtos_sys::uptime() >= started.saturating_add(50);
+    let mut invalid = [PollFd::new(9999, gtos_sys::POLLIN)];
+    let invalid_ok = timed_out
+        && gtos_sys::poll(&mut invalid, Some(0)) == 1
+        && invalid[0].revents & gtos_sys::POLLNVAL != 0;
+
+    let done = invalid_ok && wait_for_pipe_byte(fds.ctrl_r, b'D');
+    if !done {
+        let _ = gtos_sys::kill(child, gtos_sys::SIGKILL);
+    }
+    let status = wait_for_child(child);
+    fds.close_all();
+    let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+    done && status == Some(0)
+}
+
+/// Waits until all three descriptor kinds appear in a `select` read set.
+fn select_multiplex(fds: &PollFds, ready: bool) -> bool {
+    let limit = gtos_sys::FD_SETSIZE as u64;
+    if fds.pipe_r >= limit || fds.sock_a >= limit || fds.sigfd >= limit {
+        return false;
+    }
+    let mut template = FdSet::new();
+    template.insert(fds.pipe_r);
+    template.insert(fds.sock_a);
+    template.insert(fds.sigfd);
+    let deadline = gtos_sys::uptime().saturating_add(SIGNAL_TIMEOUT_MS);
+    let mut seen = [false; 3];
+    while !(seen[0] && seen[1] && seen[2]) && gtos_sys::uptime() < deadline {
+        let remaining = deadline.saturating_sub(gtos_sys::uptime()).max(1);
+        // The kernel replaces the set with the ready subset, so restore the
+        // original request before every retry.
+        let mut set = template;
+        let count = if ready {
+            gtos_sys::select(Some(&mut set), None, None, Some(remaining))
+        } else {
+            gtos_sys::ERROR
+        };
+        if count == gtos_sys::ERROR {
+            break;
+        }
+        if set.contains(fds.pipe_r) {
+            seen[0] = true;
+        }
+        if set.contains(fds.sock_a) {
+            seen[1] = true;
+        }
+        if set.contains(fds.sigfd) {
+            seen[2] = true;
+        }
+        if count == 0 {
+            gtos_sys::yield_now();
+        }
+    }
+    ready && seen[0] && seen[1] && seen[2]
+}
+
+fn select_ok() -> bool {
+    let signum = gtos_sys::SIGRTMIN + 5;
+    let sigmask = gtos_sys::signal_bit(signum);
+    let parent = gtos_sys::getpid();
+    let Some((ctrl_r, ctrl_w)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let Some((pipe_r, pipe_w)) = gtos_sys::pipe() else {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        return false;
+    };
+    let Some((sock_a, sock_b)) = gtos_sys::socketpair() else {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        return false;
+    };
+    let mut old = 0u64;
+    if gtos_sys::sigprocmask(gtos_sys::SIG_BLOCK, Some(&sigmask), Some(&mut old))
+        == gtos_sys::ERROR
+    {
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        let _ = gtos_sys::close(sock_a);
+        let _ = gtos_sys::close(sock_b);
+        return false;
+    }
+    let Some(sigfd) = gtos_sys::signalfd(&sigmask, 0) else {
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        let _ = gtos_sys::close(ctrl_r);
+        let _ = gtos_sys::close(ctrl_w);
+        let _ = gtos_sys::close(pipe_r);
+        let _ = gtos_sys::close(pipe_w);
+        let _ = gtos_sys::close(sock_a);
+        let _ = gtos_sys::close(sock_b);
+        return false;
+    };
+    let fds = PollFds {
+        ctrl_r,
+        ctrl_w,
+        pipe_r,
+        pipe_w,
+        sock_a,
+        sock_b,
+        sigfd,
+    };
+    let limit = gtos_sys::FD_SETSIZE as u64;
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        fds.close_all();
+        let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+        return false;
+    }
+    if child == 0 {
+        poll_child(parent, signum, &fds);
+    }
+
+    let ready = wait_for_pipe_byte(fds.ctrl_r, b'R');
+    let multiplexed = select_multiplex(&fds, ready);
+    let consumed = multiplexed && poll_payloads(&fds, child, signum, sigmask);
+
+    let mut writable = FdSet::new();
+    writable.insert(fds.pipe_w);
+    writable.insert(fds.sock_b);
+    let write_ready = consumed
+        && fds.pipe_w < limit
+        && fds.sock_b < limit
+        && gtos_sys::select(None, Some(&mut writable), None, Some(0)) == 2
+        && writable.contains(fds.pipe_w)
+        && writable.contains(fds.sock_b);
+
+    let mut idle = FdSet::new();
+    idle.insert(fds.pipe_r);
+    let started = gtos_sys::uptime();
+    let timed_out = write_ready
+        && gtos_sys::select(Some(&mut idle), None, None, Some(60)) == 0
+        && idle.is_empty()
+        && gtos_sys::uptime() >= started.saturating_add(50);
+
+    let mut invalid_ok = false;
+    if let Some((bad_r, bad_w)) = gtos_sys::pipe() {
+        let _ = gtos_sys::close(bad_r);
+        let _ = gtos_sys::close(bad_w);
+        if timed_out && bad_r < limit {
+            let mut except = FdSet::new();
+            except.insert(bad_r);
+            invalid_ok = gtos_sys::select(None, None, Some(&mut except), Some(0)) == 1
+                && except.contains(bad_r);
+        }
+    }
+
+    let done = invalid_ok && wait_for_pipe_byte(fds.ctrl_r, b'D');
+    if !done {
+        let _ = gtos_sys::kill(child, gtos_sys::SIGKILL);
+    }
+    let status = wait_for_child(child);
+    fds.close_all();
+    let _ = gtos_sys::sigprocmask(gtos_sys::SIG_SETMASK, Some(&old), None);
+    done && status == Some(0)
+}
+
+/// Verifies that an infinite `poll` wakes from the producer's write event.
+///
+/// A deadline-only implementation would never resume this wait, so the marker
+/// fails by hanging rather than passing on a nearby timer tick.
+fn readiness_wake_ok() -> bool {
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(read_fd);
+        gtos_sys::sleep(10);
+        let written = gtos_sys::write(write_fd, b"W") == 1;
+        let _ = gtos_sys::close(write_fd);
+        gtos_sys::exit(u64::from(!written));
+    }
+
+    let _ = gtos_sys::close(write_fd);
+    let mut entries = [PollFd {
+        fd: read_fd,
+        events: gtos_sys::POLLIN,
+        revents: 0,
+    }];
+    let ready = gtos_sys::poll(&mut entries, None);
+    let mut byte = 0;
+    let polled = ready == 1 && entries[0].revents & gtos_sys::POLLIN != 0;
+    let received = polled
+        && gtos_sys::read(read_fd, core::slice::from_mut(&mut byte)) == 1
+        && byte == b'W';
+    let _ = gtos_sys::close(read_fd);
+    let status = wait_for_child(child);
+    received && status == Some(0)
+}
+
+/// Verifies that a plain blocking `read` waits for a producer instead of
+/// returning `ERROR` on an empty descriptor.
+///
+/// The child writes after a short delay, so the parent must be parked on a
+/// readiness registration when the write happens. Both a byte pipe and a
+/// sequenced socket are checked because they use different kernel queues.
+fn blocking_read_wake_ok() -> bool {
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(read_fd);
+        gtos_sys::sleep(10);
+        let written = gtos_sys::write(write_fd, b"B") == 1;
+        let _ = gtos_sys::close(write_fd);
+        gtos_sys::exit(u64::from(!written));
+    }
+
+    let _ = gtos_sys::close(write_fd);
+    let mut byte = 0;
+    let received = gtos_sys::read(read_fd, core::slice::from_mut(&mut byte)) == 1 && byte == b'B';
+    let _ = gtos_sys::close(read_fd);
+    if !received || wait_for_child(child) != Some(0) {
+        return false;
+    }
+
+    let Some((left, right)) = gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_SEQPACKET)
+    else {
+        return false;
+    };
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(right);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(left);
+        gtos_sys::sleep(10);
+        let written = gtos_sys::write(right, b"S") == 1;
+        let _ = gtos_sys::close(right);
+        gtos_sys::exit(u64::from(!written));
+    }
+
+    let _ = gtos_sys::close(right);
+    let mut byte = 0;
+    let received = gtos_sys::read(left, core::slice::from_mut(&mut byte)) == 1 && byte == b'S';
+    let _ = gtos_sys::close(left);
+    received && wait_for_child(child) == Some(0)
+}
+
+/// Verifies that a plain blocking `write` waits for a reader instead of
+/// returning a short count when the descriptor is full. Both a byte pipe and a
+/// sequenced socket are checked because their full-queue paths differ.
+fn blocking_write_wake_ok() -> bool {
+    blocking_pipe_write_wake_ok() && blocking_socket_write_wake_ok()
+}
+
+/// Fills a byte pipe, forks a delayed reader, and verifies that a blocked write
+/// completes after that reader frees capacity. The child stays alive on an
+/// acknowledgement pipe so its final close cannot race the parent's retry.
+fn blocking_pipe_write_wake_ok() -> bool {
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let Some((ack_read, ack_write)) = gtos_sys::pipe() else {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    };
+    let Some(room) = gtos_sys::ioctl(write_fd, gtos_sys::IOCTL_FIONWRITE, 0)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        let _ = gtos_sys::close(ack_read);
+        let _ = gtos_sys::close(ack_write);
+        return false;
+    };
+    let fill = vec![0xA5u8; room];
+    if gtos_sys::write(write_fd, &fill) != room as u64 {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        let _ = gtos_sys::close(ack_read);
+        let _ = gtos_sys::close(ack_write);
+        return false;
+    }
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        let _ = gtos_sys::close(ack_read);
+        let _ = gtos_sys::close(ack_write);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(write_fd);
+        let _ = gtos_sys::close(ack_write);
+        gtos_sys::sleep(10);
+        let mut byte = 0;
+        let drained = gtos_sys::read(read_fd, core::slice::from_mut(&mut byte)) == 1;
+        let acknowledged = gtos_sys::read(ack_read, core::slice::from_mut(&mut byte)) == 1;
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(ack_read);
+        gtos_sys::exit(u64::from(!drained || !acknowledged));
+    }
+
+    let _ = gtos_sys::close(read_fd);
+    let _ = gtos_sys::close(ack_read);
+    let written = gtos_sys::write(write_fd, b"W") == 1;
+    let acknowledged = gtos_sys::write(ack_write, b"D") == 1;
+    let _ = gtos_sys::close(write_fd);
+    let _ = gtos_sys::close(ack_write);
+    written && acknowledged && wait_for_child(child) == Some(0)
+}
+
+/// Fills a sequenced socket, forks a delayed reader, and verifies that a
+/// blocked write completes after that reader consumes one datagram. An
+/// acknowledgement pipe prevents the child's exit from racing the retry.
+fn blocking_socket_write_wake_ok() -> bool {
+    let Some((left, right)) = gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_SEQPACKET)
+    else {
+        return false;
+    };
+    let Some((ack_read, ack_write)) = gtos_sys::pipe() else {
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(right);
+        return false;
+    };
+    let payload = [0x5Au8; SOCKET_DATAGRAM_BYTES];
+    let mut filled = true;
+    for _ in 0..4 {
+        filled &= gtos_sys::write(right, &payload) == SOCKET_DATAGRAM_BYTES as u64;
+    }
+    if !filled {
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(right);
+        let _ = gtos_sys::close(ack_read);
+        let _ = gtos_sys::close(ack_write);
+        return false;
+    }
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(right);
+        let _ = gtos_sys::close(ack_read);
+        let _ = gtos_sys::close(ack_write);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::close(right);
+        let _ = gtos_sys::close(ack_write);
+        gtos_sys::sleep(10);
+        let mut byte = 0;
+        let drained = gtos_sys::read(left, core::slice::from_mut(&mut byte)) == 1;
+        let acknowledged = gtos_sys::read(ack_read, core::slice::from_mut(&mut byte)) == 1;
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(ack_read);
+        gtos_sys::exit(u64::from(!drained || !acknowledged));
+    }
+
+    let _ = gtos_sys::close(left);
+    let _ = gtos_sys::close(ack_read);
+    let written = gtos_sys::write(right, b"S") == 1;
+    let acknowledged = gtos_sys::write(ack_write, b"D") == 1;
+    let _ = gtos_sys::close(right);
+    let _ = gtos_sys::close(ack_write);
+    written && acknowledged && wait_for_child(child) == Some(0)
+}
+
+/// Verifies that a plain `waitpid` parks until the child exits instead of
+/// returning `ERROR` while the child is still live.
+fn blocking_waitpid_wake_ok() -> bool {
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        return false;
+    }
+    if child == 0 {
+        gtos_sys::sleep(50);
+        gtos_sys::exit(7);
+    }
+    let mut status = 0;
+    gtos_sys::waitpid(child, &mut status) == child && status == 7
 }
 
 fn signal_queued_ok() -> bool {
@@ -324,12 +1128,40 @@ fn signal_queued_ok() -> bool {
     unsafe { QUEUED_FIRST_RAN && QUEUED_SECOND_RAN }
 }
 
+/// Reports whether a descriptor can be read without blocking.
+///
+/// Bounded test probes use this before `read` so an empty blocking pipe or
+/// socket cannot park the guest. Terminal conditions such as `POLLHUP` also
+/// count as readable, letting the following `read` return EOF.
+fn poll_readable(fd: u64) -> bool {
+    let mut entries = [PollFd {
+        fd,
+        events: gtos_sys::POLLIN,
+        revents: 0,
+    }];
+    gtos_sys::poll(&mut entries, Some(0)) != 0
+}
+
+/// Writes only when the descriptor already has room, so bounded full-queue
+/// probes cannot park the guest behind a blocking write.
+fn write_if_writable(fd: u64, bytes: &[u8]) -> u64 {
+    let mut entries = [PollFd {
+        fd,
+        events: gtos_sys::POLLOUT,
+        revents: 0,
+    }];
+    if gtos_sys::poll(&mut entries, Some(0)) == 0 {
+        return gtos_sys::ERROR;
+    }
+    gtos_sys::write(fd, bytes)
+}
+
 fn wait_for_pipe_byte(fd: u64, expected: u8) -> bool {
     let deadline = gtos_sys::uptime().saturating_add(SIGNAL_TIMEOUT_MS);
-    let mut byte = 0;
     loop {
-        if gtos_sys::read(fd, core::slice::from_mut(&mut byte)) == 1 && byte == expected {
-            return true;
+        if poll_readable(fd) {
+            let mut byte = 0;
+            return gtos_sys::read(fd, core::slice::from_mut(&mut byte)) == 1 && byte == expected;
         }
         if gtos_sys::uptime() >= deadline {
             return false;
@@ -996,7 +1828,11 @@ fn launch_target(target: &[u8]) -> bool {
         return false;
     }
     if child == 0 {
-        gtos_sys::exec(&image);
+        let mut args = Vec::with_capacity(target.len() + 2);
+        args.extend_from_slice(target);
+        args.push(0);
+        args.push(0);
+        gtos_sys::exec_with_args(&image, &args);
         gtos_sys::exit(1);
     }
     let deadline = gtos_sys::uptime().saturating_add(LAUNCH_WAIT_MS);
@@ -1740,21 +2576,26 @@ fn streaming_ipc_ok() -> bool {
     }
 
     // The parent keeps only the read end, so EOF arrives when the child closes
-    // its inherited write end. Empty reads are retried because pipes are
-    // nonblocking until a fuller scheduler exists.
+    // its inherited write end. The loop still tolerates a short read.
     let _ = gtos_sys::close(write_fd);
     let mut received = [0u8; 16];
     let mut length = 0;
     let mut eof = false;
     let deadline = gtos_sys::monotonic_ns().saturating_add(2_000_000_000);
     while length < received.len() {
+        if !poll_readable(read_fd) {
+            if gtos_sys::monotonic_ns() >= deadline {
+                break;
+            }
+            gtos_sys::yield_now();
+            continue;
+        }
         match gtos_sys::read(read_fd, &mut received[length..]) {
             0 => {
                 eof = true;
                 break;
             }
-            gtos_sys::ERROR if gtos_sys::monotonic_ns() >= deadline => break,
-            gtos_sys::ERROR => gtos_sys::yield_now(),
+            gtos_sys::ERROR => break,
             count => match usize::try_from(count) {
                 Ok(count) => length += count,
                 Err(_) => break,
@@ -1820,6 +2661,9 @@ fn ioctl_ok() -> bool {
 
 /// Reads one datagram, distinguishing `ERROR` (no data) from EOF (zero bytes).
 fn read_datagram(fd: u64, out: &mut [u8]) -> Option<usize> {
+    if !poll_readable(fd) {
+        return None;
+    }
     match gtos_sys::read(fd, out) {
         gtos_sys::ERROR => None,
         count => usize::try_from(count)
@@ -1857,7 +2701,7 @@ fn socketpair_data_ok() -> bool {
     for _ in 0..4 {
         ok = ok && gtos_sys::write(right, &payload) == SOCKET_DATAGRAM_BYTES as u64;
     }
-    ok = ok && gtos_sys::write(right, b"full") == gtos_sys::ERROR;
+    ok = ok && write_if_writable(right, b"full") == gtos_sys::ERROR;
     ok = ok && gtos_sys::ioctl(right, gtos_sys::IOCTL_FIONWRITE, 0) == Some(0);
     ok = ok && gtos_sys::ioctl(left, gtos_sys::IOCTL_FIONWRITE, 0) == Some(4096);
     ok = ok && gtos_sys::ioctl(left, gtos_sys::IOCTL_FIONREAD, 0) == Some(1024);
@@ -1917,8 +2761,321 @@ fn socketpair_inherit_eof_ok() -> bool {
     ok
 }
 
+/// Verifies that `pipe2` applies both status and descriptor flags to each end.
+fn pipe2_flags_ok() -> bool {
+    let flags = gtos_sys::O_NONBLOCK | gtos_sys::O_CLOEXEC;
+    let Some((read_fd, write_fd)) = gtos_sys::pipe2(flags) else {
+        return false;
+    };
+    let mut ok = gtos_sys::fcntl(read_fd, gtos_sys::F_GETFL, 0) == gtos_sys::O_NONBLOCK
+        && gtos_sys::fcntl(write_fd, gtos_sys::F_GETFL, 0) == gtos_sys::O_NONBLOCK;
+    ok = ok
+        && gtos_sys::fcntl(read_fd, gtos_sys::F_GETFD, 0) == gtos_sys::FD_CLOEXEC
+        && gtos_sys::fcntl(write_fd, gtos_sys::F_GETFD, 0) == gtos_sys::FD_CLOEXEC;
+    let mut byte = 0;
+    ok = ok && gtos_sys::read(read_fd, core::slice::from_mut(&mut byte)) == gtos_sys::ERROR;
+    let _ = gtos_sys::close(read_fd);
+    let _ = gtos_sys::close(write_fd);
+    ok
+}
+
+fn dup_ok() -> bool {
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let dup_read = gtos_sys::dup(read_fd);
+    let dup_write = gtos_sys::dup(write_fd);
+    let mut ok = dup_read != gtos_sys::ERROR && dup_write != gtos_sys::ERROR;
+    ok = ok && gtos_sys::write(write_fd, b"dup") == 3;
+    ok = ok && gtos_sys::close(write_fd) != gtos_sys::ERROR;
+    let mut first = [0u8; 2];
+    let mut second = [0u8; 1];
+    ok = ok
+        && read_exact(read_fd, &mut first)
+        && first[..] == b"du"[..]
+        && read_exact(dup_read, &mut second)
+        && second[0] == b'p';
+    ok = ok && gtos_sys::ioctl(read_fd, gtos_sys::IOCTL_FIONREAD, 0) == Some(0);
+    ok = ok && gtos_sys::write(dup_write, b"!") == 1;
+    ok = ok && gtos_sys::close(dup_write) != gtos_sys::ERROR;
+    let mut tail = [0u8; 1];
+    ok = ok && read_exact(dup_read, &mut tail) && tail[0] == b'!';
+    let _ = gtos_sys::close(read_fd);
+    let _ = gtos_sys::close(dup_read);
+
+    let Some((r1, w1)) = gtos_sys::pipe() else {
+        return false;
+    };
+    let Some((r2, _w2)) = gtos_sys::pipe() else {
+        let _ = gtos_sys::close(r1);
+        let _ = gtos_sys::close(w1);
+        return false;
+    };
+    ok = ok && gtos_sys::dup2(r1, r2) == r2;
+    ok = ok && gtos_sys::write(w1, b"2") == 1;
+    let mut dup2_byte = [0u8; 1];
+    ok = ok && read_exact(r2, &mut dup2_byte) && dup2_byte[0] == b'2';
+    ok = ok && gtos_sys::dup2(r1, r1) == r1;
+    ok = ok && gtos_sys::fcntl(r1, gtos_sys::F_GETFD, 0) == 0;
+    ok = ok && gtos_sys::fcntl(r1, gtos_sys::F_SETFD, gtos_sys::FD_CLOEXEC) != gtos_sys::ERROR;
+    ok = ok && gtos_sys::fcntl(r1, gtos_sys::F_GETFD, 0) == gtos_sys::FD_CLOEXEC;
+    ok = ok && gtos_sys::fcntl(r1, gtos_sys::F_SETFD, 0) != gtos_sys::ERROR;
+    ok = ok && gtos_sys::fcntl(r1, gtos_sys::F_GETFD, 0) == 0;
+    let _ = gtos_sys::close(r1);
+    let _ = gtos_sys::close(r2);
+    let _ = gtos_sys::close(w1);
+    ok
+}
+
+fn socketpair_stream_ok() -> bool {
+    let Some((left, right)) = gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_STREAM)
+    else {
+        return false;
+    };
+    let mut ok = gtos_sys::write(left, b"ab") == 2 && gtos_sys::write(left, b"cd") == 2;
+    let mut buf = [0u8; 4];
+    ok = ok && read_exact(right, &mut buf) && buf[..] == b"abcd"[..];
+    ok = ok && gtos_sys::write(right, b"ef") == 2;
+    let mut tail = [0u8; 2];
+    ok = ok && read_exact(left, &mut tail) && tail[..] == b"ef"[..];
+    // SHUT_WR on one end makes peer reads return EOF after buffered data drains.
+    ok = ok && gtos_sys::write(left, b"z") == 1;
+    ok = ok && gtos_sys::shutdown(left, gtos_sys::SHUT_WR) == 0;
+    let mut eof = [0u8; 1];
+    ok = ok && read_exact(right, &mut eof) && eof[0] == b'z';
+    ok = ok && gtos_sys::read(right, &mut eof) == 0;
+    // O_NONBLOCK: EOF stays 0; empty read with live peer returns ERROR.
+    ok = ok && gtos_sys::fcntl(right, gtos_sys::F_SETFL, gtos_sys::O_NONBLOCK) != gtos_sys::ERROR;
+    ok = ok && gtos_sys::fcntl(right, gtos_sys::F_GETFL, 0) & gtos_sys::O_NONBLOCK != 0;
+    let mut nb = [0u8; 1];
+    ok = ok && gtos_sys::read(right, &mut nb) == 0;
+    let Some((a, b)) = gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_STREAM) else {
+        let _ = gtos_sys::close(left);
+        let _ = gtos_sys::close(right);
+        return false;
+    };
+    ok = ok && gtos_sys::fcntl(a, gtos_sys::F_SETFL, gtos_sys::O_NONBLOCK) != gtos_sys::ERROR;
+    ok = ok && gtos_sys::read(a, &mut nb) == gtos_sys::ERROR;
+    let _ = gtos_sys::close(a);
+    let _ = gtos_sys::close(b);
+    let _ = gtos_sys::close(left);
+    let _ = gtos_sys::close(right);
+    ok
+}
+
+fn socketpair_nonblock_ok() -> bool {
+    let Some((a, b)) = gtos_sys::socketpair_with(
+        gtos_sys::AF_UNIX,
+        gtos_sys::SOCK_SEQPACKET | gtos_sys::SOCK_NONBLOCK,
+    ) else {
+        return false;
+    };
+    let mut byte = [0u8; 1];
+    let mut ok = gtos_sys::fcntl(a, gtos_sys::F_GETFL, 0) & gtos_sys::O_NONBLOCK != 0;
+    ok = ok && gtos_sys::fcntl(b, gtos_sys::F_GETFL, 0) & gtos_sys::O_NONBLOCK != 0;
+    ok = ok && gtos_sys::read(a, &mut byte) == gtos_sys::ERROR;
+    let _ = gtos_sys::close(a);
+    let _ = gtos_sys::close(b);
+
+    let Some((c, d)) = gtos_sys::socketpair_with(
+        gtos_sys::AF_UNIX,
+        gtos_sys::SOCK_STREAM | gtos_sys::SOCK_NONBLOCK,
+    ) else {
+        return false;
+    };
+    ok = ok && gtos_sys::fcntl(c, gtos_sys::F_GETFL, 0) & gtos_sys::O_NONBLOCK != 0;
+    ok = ok && gtos_sys::fcntl(d, gtos_sys::F_GETFL, 0) & gtos_sys::O_NONBLOCK != 0;
+    ok = ok && gtos_sys::read(c, &mut byte) == gtos_sys::ERROR;
+    let _ = gtos_sys::close(c);
+    let _ = gtos_sys::close(d);
+    ok
+}
+
+fn cloexec_exec_ok() -> bool {
+    // Flat ring-3 program: if fd 3 survived exec, read succeeds -> exit 1;
+    // if CLOEXEC closed it, read returns -1 -> print marker and exit 0.
+    // int 0x80 ABI: rax=syscall, rdi/rsi/rdx=args, rax=ret.
+    const PROG: &[u8] = &[
+        0x48, 0x83, 0xec, 0x08, // sub rsp, 8
+        0xb8, 0x03, 0x00, 0x00, 0x00, // mov eax, SYS_READ
+        0xbf, 0x03, 0x00, 0x00, 0x00, // mov edi, 3
+        0x48, 0x89, 0xe6, // mov rsi, rsp
+        0xba, 0x01, 0x00, 0x00, 0x00, // mov edx, 1
+        0xcd, 0x80, // int 0x80
+        0x48, 0x83, 0xf8, 0xff, // cmp rax, -1
+        0x75, 0x21, // jne fail
+        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, SYS_WRITE
+        0xbf, 0x01, 0x00, 0x00, 0x00, // mov edi, 1
+        0x48, 0x8d, 0x35, 0x1c, 0x00, 0x00, 0x00, // lea rsi, [rip+0x1c] -> msg
+        0xba, 0x0c, 0x00, 0x00, 0x00, // mov edx, 12
+        0xcd, 0x80, // int 0x80
+        0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, SYS_EXIT
+        0x31, 0xff, // xor edi, edi
+        0xcd, 0x80, // int 0x80
+        // fail:
+        0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, SYS_EXIT
+        0xbf, 0x01, 0x00, 0x00, 0x00, // mov edi, 1
+        0xcd, 0x80, // int 0x80
+        b'c', b'l', b'o', b'e', b'x', b'e', b'c', b' ', b'o', b'k', b'\r', b'\n',
+    ];
+
+    let Some((read_fd, write_fd)) = gtos_sys::pipe() else {
+        return false;
+    };
+    if gtos_sys::write(write_fd, b"x") != 1 {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    let _ = gtos_sys::close(write_fd);
+    if gtos_sys::dup2(read_fd, 3) != 3 {
+        let _ = gtos_sys::close(read_fd);
+        return false;
+    }
+    if read_fd != 3 {
+        let _ = gtos_sys::close(read_fd);
+    }
+    if gtos_sys::fcntl(3, gtos_sys::F_SETFD, gtos_sys::FD_CLOEXEC) == gtos_sys::ERROR {
+        let _ = gtos_sys::close(3);
+        return false;
+    }
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(3);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::exec(PROG);
+        gtos_sys::exit(2);
+    }
+    let _ = gtos_sys::close(3);
+    wait_for_child(child) == Some(0)
+}
+
+fn cloexec_ok() -> bool {
+    cloexec_exec_ok()
+}
+
+/// Builds a flat ring-3 image that reads `fd`, prints `message` when the read
+/// fails, and exits. Used to prove that a CLOEXEC descriptor is gone after
+/// `exec`; the fd is patched into the instruction stream at runtime.
+fn cloexec_probe(fd: u64, message: &[u8]) -> Vec<u8> {
+    let mut code = Vec::with_capacity(96 + message.len());
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x08]); // sub rsp, 8
+    code.extend_from_slice(&[0xb8, 0x03, 0x00, 0x00, 0x00]); // mov eax, SYS_READ
+    code.push(0xbf); // mov edi, fd
+    let fd = u32::try_from(fd).unwrap_or(u32::MAX);
+    code.extend_from_slice(&fd.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x89, 0xe6]); // mov rsi, rsp
+    code.extend_from_slice(&[0xba, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+    code.extend_from_slice(&[0xcd, 0x80]); // int 0x80
+    code.extend_from_slice(&[0x48, 0x83, 0xf8, 0xff]); // cmp rax, -1
+    code.push(0x75); // jne fail
+    let fail_rel = code.len();
+    code.push(0x00);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_WRITE
+    code.extend_from_slice(&[0xbf, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea = code.len();
+    code.extend_from_slice(&[0x48, 0x8d, 0x35, 0x00, 0x00, 0x00, 0x00]); // lea rsi, [rip+..]
+    code.push(0xba); // mov edx, message.len()
+    let message_len = u32::try_from(message.len()).unwrap_or(0);
+    code.extend_from_slice(&message_len.to_le_bytes());
+    code.extend_from_slice(&[0xcd, 0x80]); // int 0x80
+    code.extend_from_slice(&[0xb8, 0x00, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x31, 0xff]); // xor edi, edi
+    code.extend_from_slice(&[0xcd, 0x80]); // int 0x80
+    let fail = code.len();
+    code[fail_rel] = u8::try_from(fail - fail_rel - 1).unwrap_or(0);
+    let message_at = code.len();
+    let displacement = message_at.saturating_sub(lea + 7);
+    let displacement = u32::try_from(displacement).unwrap_or(0);
+    code[lea + 3..lea + 7].copy_from_slice(&displacement.to_le_bytes());
+    code.extend_from_slice(message);
+    code
+}
+
+fn socketpair_cloexec_ok() -> bool {
+    let Some((read_fd, write_fd)) = gtos_sys::socketpair_with(
+        gtos_sys::AF_UNIX,
+        gtos_sys::SOCK_STREAM | gtos_sys::SOCK_CLOEXEC,
+    ) else {
+        return false;
+    };
+    let mut ok = gtos_sys::fcntl(read_fd, gtos_sys::F_GETFD, 0) == gtos_sys::FD_CLOEXEC;
+    ok = ok && gtos_sys::fcntl(write_fd, gtos_sys::F_GETFD, 0) == gtos_sys::FD_CLOEXEC;
+    let probe = cloexec_probe(read_fd, SOCK_CLOEXEC_OK);
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+        return false;
+    }
+    if child == 0 {
+        let _ = gtos_sys::exec(&probe);
+        gtos_sys::exit(2);
+    }
+    let _ = gtos_sys::close(read_fd);
+    let _ = gtos_sys::close(write_fd);
+    ok && wait_for_child(child) == Some(0)
+}
+
+fn socket_credentials_ok() -> bool {
+    let creator = gtos_sys::getpid();
+    let Some((seq_a, seq_b)) =
+        gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_SEQPACKET)
+    else {
+        return false;
+    };
+    let Some((stream_a, stream_b)) =
+        gtos_sys::socketpair_with(gtos_sys::AF_UNIX, gtos_sys::SOCK_STREAM)
+    else {
+        let _ = gtos_sys::close(seq_a);
+        let _ = gtos_sys::close(seq_b);
+        return false;
+    };
+    let request = gtos_sys::IOCTL_SOCKET_PEER_PID;
+    let mut ok = gtos_sys::ioctl(seq_a, request, 0) == Some(creator)
+        && gtos_sys::ioctl(seq_b, request, 0) == Some(creator)
+        && gtos_sys::ioctl(stream_a, request, 0) == Some(creator)
+        && gtos_sys::ioctl(stream_b, request, 0) == Some(creator);
+
+    let child = gtos_sys::fork();
+    if child == gtos_sys::ERROR {
+        let _ = gtos_sys::close(seq_a);
+        let _ = gtos_sys::close(seq_b);
+        let _ = gtos_sys::close(stream_a);
+        let _ = gtos_sys::close(stream_b);
+        return false;
+    }
+    if child == 0 {
+        let inherited = gtos_sys::ioctl(seq_a, request, 0) == Some(creator)
+            && gtos_sys::ioctl(stream_b, request, 0) == Some(creator);
+        gtos_sys::exit(u64::from(!inherited));
+    }
+    ok = ok && wait_for_child(child) == Some(0);
+
+    // A plain pipe has no peer process, so the same ioctl must reject it.
+    if let Some((read_fd, write_fd)) = gtos_sys::pipe() {
+        ok = ok && gtos_sys::ioctl(read_fd, request, 0).is_none();
+        let _ = gtos_sys::close(read_fd);
+        let _ = gtos_sys::close(write_fd);
+    } else {
+        ok = false;
+    }
+
+    let _ = gtos_sys::close(seq_a);
+    let _ = gtos_sys::close(seq_b);
+    let _ = gtos_sys::close(stream_a);
+    let _ = gtos_sys::close(stream_b);
+    ok
+}
+
 fn socketpair_ok() -> bool {
-    socketpair_data_ok() && socketpair_inherit_eof_ok()
+    socketpair_data_ok()
+        && socketpair_inherit_eof_ok()
+        && socketpair_stream_ok()
+        && socketpair_nonblock_ok()
 }
 
 /// Writes more than one FAT cluster in chunks, then seeks and reads it back.
@@ -2075,10 +3232,15 @@ fn read_exact(fd: u64, output: &mut [u8]) -> bool {
     let deadline = gtos_sys::monotonic_ns().saturating_add(2_000_000_000);
     let mut filled = 0;
     while filled < output.len() {
+        if !poll_readable(fd) {
+            if gtos_sys::monotonic_ns() >= deadline {
+                return false;
+            }
+            gtos_sys::yield_now();
+            continue;
+        }
         match gtos_sys::read(fd, &mut output[filled..]) {
-            gtos_sys::ERROR if gtos_sys::monotonic_ns() >= deadline => return false,
-            gtos_sys::ERROR => gtos_sys::yield_now(),
-            0 => return false,
+            gtos_sys::ERROR | 0 => return false,
             count => match usize::try_from(count) {
                 Ok(count) => filled += count,
                 Err(_) => return false,
@@ -2092,9 +3254,14 @@ fn read_line(fd: u64, output: &mut [u8]) -> Option<usize> {
     let deadline = gtos_sys::monotonic_ns().saturating_add(2_000_000_000);
     let mut length = 0;
     while length < output.len() {
+        if !poll_readable(fd) {
+            if gtos_sys::monotonic_ns() >= deadline {
+                return None;
+            }
+            gtos_sys::yield_now();
+            continue;
+        }
         match gtos_sys::read(fd, &mut output[length..=length]) {
-            gtos_sys::ERROR if gtos_sys::monotonic_ns() >= deadline => return None,
-            gtos_sys::ERROR => gtos_sys::yield_now(),
             1 => {
                 if output[length] == b'\n' {
                     return Some(length);
@@ -2427,7 +3594,12 @@ fn main() {
     report(shell_launch_ok(), SHELL_LAUNCH_OK, SHELL_LAUNCH_FAIL);
     report(shm_ok(), SHM_OK, SHM_FAIL);
     report(streaming_ipc_ok(), STREAM_OK, STREAM_FAIL);
+    report(pipe2_flags_ok(), PIPE2_OK, PIPE2_FAIL);
+    report(dup_ok(), DUP_OK, DUP_FAIL);
+    report(cloexec_ok(), CLOEXEC_OK, CLOEXEC_FAIL);
     report(socketpair_ok(), SOCKET_OK, SOCKET_FAIL);
+    report(socketpair_cloexec_ok(), SOCK_CLOEXEC_OK, SOCK_CLOEXEC_FAIL);
+    report(socket_credentials_ok(), SOCKET_CRED_OK, SOCKET_CRED_FAIL);
     report(ioctl_ok(), IOCTL_OK, IOCTL_FAIL);
     report(stream_file_ok(), STREAM_FILE_OK, STREAM_FILE_FAIL);
     report(fat_writeback_ok(), WRITEBACK_OK, WRITEBACK_FAIL);
@@ -2456,5 +3628,25 @@ fn main() {
         SIGNAL_KILL_FAIL,
     );
     report(rt_signal_queue_ok(), RT_SIGNAL_OK, RT_SIGNAL_FAIL);
+    report(signal_wait_ok(), SIGNAL_WAIT_OK, SIGNAL_WAIT_FAIL);
+    report(signalfd_ok(), SIGNALFD_OK, SIGNALFD_FAIL);
+    report(poll_ok(), POLL_OK, POLL_FAIL);
+    report(select_ok(), SELECT_OK, SELECT_FAIL);
+    report(readiness_wake_ok(), READINESS_WAKE_OK, READINESS_WAKE_FAIL);
+    report(
+        blocking_read_wake_ok(),
+        BLOCKING_READ_OK,
+        BLOCKING_READ_FAIL,
+    );
+    report(
+        blocking_write_wake_ok(),
+        BLOCKING_WRITE_OK,
+        BLOCKING_WRITE_FAIL,
+    );
+    report(
+        blocking_waitpid_wake_ok(),
+        BLOCKING_WAITPID_OK,
+        BLOCKING_WAITPID_FAIL,
+    );
     report(fault_signal_ok(), FAULT_SIGNAL_OK, FAULT_SIGNAL_FAIL);
 }

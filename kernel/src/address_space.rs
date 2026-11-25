@@ -14,8 +14,8 @@
 //! shares frames copy-on-write, so each process holds a reference until it
 //! writes and makes the frame private.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -29,14 +29,112 @@ use x86_64::structures::paging::{
 const PAGE_BYTES: u64 = 4096;
 const PML4_ENTRIES: usize = 512;
 
+/// Looks up a page-keyed entry in one of the address space's linear tables.
+fn page_entry<T: Copy>(entries: &[(u64, T)], page: u64) -> Option<T> {
+    entries
+        .iter()
+        .find(|(key, _)| *key == page)
+        .map(|(_, value)| *value)
+}
+
+/// Inserts or replaces a page-keyed entry in one of the linear tables.
+fn set_page_entry<T: Copy>(entries: &mut Vec<(u64, T)>, page: u64, value: T) {
+    if let Some(entry) = entries.iter_mut().find(|(key, _)| *key == page) {
+        entry.1 = value;
+    } else {
+        entries.push((page, value));
+    }
+}
+
+/// Removes a page-keyed entry from one of the linear tables.
+fn take_page_entry<T>(entries: &mut Vec<(u64, T)>, page: u64) -> Option<T> {
+    let index = entries.iter().position(|(key, _)| *key == page)?;
+    Some(entries.remove(index).1)
+}
+
 /// The bootloader's physical-memory window offset, published by [`init`].
 static OFFSET: AtomicU64 = AtomicU64::new(0);
 
-/// Reference counts for every frame handed out by the physical frame pool.
+/// Maximum number of simultaneously referenced physical frames.
 ///
-/// The key is the frame's physical address. The count tells us when the last
-/// owner is gone and the frame can be returned to the pool.
-static FRAME_REFS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
+/// This only bounds *tracked* frames, not the physical pool. A kernel with a few
+/// processes and some shared mappings stays far below it; running out is a bug
+/// and panics instead of silently losing a reference.
+const MAX_FRAME_REFS: usize = 16_384;
+
+/// Static storage backing [`FRAME_REFS`].
+///
+/// Keeping the arrays in static storage, rather than inside a heap object, makes
+/// frame bookkeeping allocation-free. Frame release runs while address spaces
+/// are torn down, often from syscall paths that also hold scheduler locks; a
+/// `BTreeMap` there would allocate and free nodes on a path where an allocator
+/// bug could corrupt unrelated kernel state.
+struct FrameStore {
+    keys: UnsafeCell<[u64; MAX_FRAME_REFS]>,
+    counts: UnsafeCell<[usize; MAX_FRAME_REFS]>,
+}
+
+// SAFETY: every access is made through the `FRAME_REFS` mutex, so only one
+// context can hold a mutable view of either array at a time.
+unsafe impl Sync for FrameStore {}
+
+static FRAME_STORE: FrameStore = FrameStore {
+    keys: UnsafeCell::new([0; MAX_FRAME_REFS]),
+    counts: UnsafeCell::new([0; MAX_FRAME_REFS]),
+};
+
+struct FrameRefs {
+    len: usize,
+}
+
+impl FrameRefs {
+    const fn new() -> Self {
+        Self { len: 0 }
+    }
+
+    /// Returns mutable views of both arrays. The caller must hold `FRAME_REFS`.
+    fn arrays() -> (
+        &'static mut [u64; MAX_FRAME_REFS],
+        &'static mut [usize; MAX_FRAME_REFS],
+    ) {
+        // SAFETY: `FrameRefs` is only reachable through the `FRAME_REFS` mutex,
+        // which excludes concurrent access to the static cells.
+        unsafe { (&mut *FRAME_STORE.keys.get(), &mut *FRAME_STORE.counts.get()) }
+    }
+
+    fn retain(&mut self, address: u64) {
+        let len = self.len;
+        let (keys, counts) = Self::arrays();
+        if let Some(index) = keys[..len].iter().position(|&key| key == address) {
+            counts[index] += 1;
+            return;
+        }
+        assert!(len < MAX_FRAME_REFS, "frame reference table is full");
+        keys[len] = address;
+        counts[len] = 1;
+        self.len = len + 1;
+    }
+
+    /// Decrements one reference, returning `true` when the frame became free.
+    fn release(&mut self, address: u64) -> bool {
+        let len = self.len;
+        let (keys, counts) = Self::arrays();
+        let Some(index) = keys[..len].iter().position(|&key| key == address) else {
+            return false;
+        };
+        if counts[index] > 1 {
+            counts[index] -= 1;
+            return false;
+        }
+        let last = len - 1;
+        keys[index] = keys[last];
+        counts[index] = counts[last];
+        self.len = last;
+        true
+    }
+}
+
+static FRAME_REFS: Mutex<FrameRefs> = Mutex::new(FrameRefs::new());
 
 /// Remembers the physical-memory window offset.
 pub fn init(offset: u64) {
@@ -63,40 +161,18 @@ pub fn allocate_frame() -> Option<PhysFrame> {
     unsafe {
         core::ptr::write_bytes(at::<u8>(frame), 0, PAGE_BYTES as usize);
     }
-    FRAME_REFS
-        .lock()
-        .entry(frame.start_address().as_u64())
-        .and_modify(|count| *count += 1)
-        .or_insert(1);
+    FRAME_REFS.lock().retain(frame.start_address().as_u64());
     Some(frame)
 }
 
 /// Adds another owner reference to a shared frame.
 fn retain_frame(frame: PhysFrame) {
-    FRAME_REFS
-        .lock()
-        .entry(frame.start_address().as_u64())
-        .and_modify(|count| *count += 1)
-        .or_insert(1);
+    FRAME_REFS.lock().retain(frame.start_address().as_u64());
 }
 
 /// Releases one owner reference, returning the frame to the pool at zero.
 fn release_frame(frame: PhysFrame) {
-    let address = frame.start_address().as_u64();
-    let free = {
-        let mut refs = FRAME_REFS.lock();
-        match refs.get_mut(&address) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
-            }
-            Some(_) => {
-                refs.remove(&address);
-                true
-            }
-            None => false,
-        }
-    };
+    let free = FRAME_REFS.lock().release(frame.start_address().as_u64());
     if free {
         // SAFETY: the reference count proved this layer owns the frame
         // exclusively, so no page table or live allocation still refers to it.
@@ -150,12 +226,13 @@ pub struct AddressSpace {
     page_table_frames: Vec<PhysFrame>,
     /// Page-aligned user virtual addresses already mapped in this space. This
     /// makes mapping an ELF segment that shares a page with another segment safe.
-    mapped: BTreeMap<u64, PhysFrame>,
+    /// Linear tables keep page bookkeeping allocation-light and deterministic.
+    mapped: Vec<(u64, PhysFrame)>,
     /// The flags used for each mapped page, kept so `fork` can reproduce them.
-    page_flags: BTreeMap<u64, PageTableFlags>,
+    page_flags: Vec<(u64, PageTableFlags)>,
     /// Pages shared after `fork`: virtual page -> original frame and the flags
     /// it had before the page was made read-only for copy-on-write.
-    cow_pages: BTreeMap<u64, (PhysFrame, PageTableFlags)>,
+    cow_pages: Vec<(u64, (PhysFrame, PageTableFlags))>,
     /// Explicit shared-memory mappings: region, attaching PID, virtual page and
     /// frame. These are deliberately excluded from `mapped` so `fork` does not
     /// turn a genuinely shared region into a copy-on-write page.
@@ -193,9 +270,9 @@ impl AddressSpace {
             pml4: new_frame,
             user_frames: Vec::new(),
             page_table_frames: Vec::new(),
-            mapped: BTreeMap::new(),
-            page_flags: BTreeMap::new(),
-            cow_pages: BTreeMap::new(),
+            mapped: Vec::new(),
+            page_flags: Vec::new(),
+            cow_pages: Vec::new(),
             shared_mappings: Vec::new(),
         })
     }
@@ -308,7 +385,7 @@ impl AddressSpace {
         executable: bool,
     ) -> Result<u64, &'static str> {
         let page_start = virtual_address & !(PAGE_BYTES - 1);
-        if let Some(frame) = self.mapped.get(&page_start) {
+        if let Some(frame) = page_entry(&self.mapped, page_start) {
             return Ok((offset_virt() + frame.start_address().as_u64()).as_u64());
         }
 
@@ -325,8 +402,8 @@ impl AddressSpace {
             return Err(error);
         }
         self.user_frames.push(frame);
-        self.mapped.insert(page_start, frame);
-        self.page_flags.insert(page_start, flags);
+        set_page_entry(&mut self.mapped, page_start, frame);
+        set_page_entry(&mut self.page_flags, page_start, flags);
         Ok((offset_virt() + frame.start_address().as_u64()).as_u64())
     }
 
@@ -337,8 +414,7 @@ impl AddressSpace {
     #[must_use]
     pub fn mapped_frame_address(&self, virtual_address: u64) -> Option<u64> {
         let page_start = virtual_address & !(PAGE_BYTES - 1);
-        self.mapped
-            .get(&page_start)
+        page_entry(&self.mapped, page_start)
             .map(|frame| (offset_virt() + frame.start_address().as_u64()).as_u64())
     }
 
@@ -358,7 +434,7 @@ impl AddressSpace {
             let page = base
                 .checked_add(index as u64 * PAGE_BYTES)
                 .ok_or("shared region overflow")?;
-            if self.mapped.contains_key(&page)
+            if page_entry(&self.mapped, page).is_some()
                 || self
                     .shared_mappings
                     .iter()
@@ -422,34 +498,22 @@ impl AddressSpace {
         let mut child = Self::new()?;
         // Collect first: marking the parent's pages read-only mutates `self`
         // while the old loop would still be borrowing `self.mapped`.
-        let pages: alloc::vec::Vec<_> = self
-            .mapped
-            .iter()
-            .map(|(&page_start, &frame)| (page_start, frame))
-            .collect();
+        let pages = self.mapped.clone();
         for (page_start, frame) in pages {
-            let flags = self
-                .page_flags
-                .get(&page_start)
-                .copied()
-                .unwrap_or_else(|| {
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::USER_ACCESSIBLE
-                        | PageTableFlags::WRITABLE
-                });
-            let original_flags = self
-                .cow_pages
-                .get(&page_start)
-                .map_or(flags, |&(_, original)| original);
+            let flags = page_entry(&self.page_flags, page_start).unwrap_or_else(|| {
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE
+            });
+            let original_flags =
+                page_entry(&self.cow_pages, page_start).map_or(flags, |(_, original)| original);
 
             let child_flags = if original_flags.contains(PageTableFlags::WRITABLE) {
                 if flags.contains(PageTableFlags::WRITABLE) {
                     let shared_flags = original_flags & !PageTableFlags::WRITABLE;
                     self.set_page_flags(page_start, shared_flags)?;
-                    self.page_flags.insert(page_start, shared_flags);
+                    set_page_entry(&mut self.page_flags, page_start, shared_flags);
                 }
-                self.cow_pages.insert(page_start, (frame, original_flags));
-                child.cow_pages.insert(page_start, (frame, original_flags));
+                set_page_entry(&mut self.cow_pages, page_start, (frame, original_flags));
+                set_page_entry(&mut child.cow_pages, page_start, (frame, original_flags));
                 original_flags & !PageTableFlags::WRITABLE
             } else {
                 flags
@@ -461,8 +525,8 @@ impl AddressSpace {
             retain_frame(frame);
             child.user_frames.push(frame);
             child.map_frame(page_start, frame, child_flags)?;
-            child.mapped.insert(page_start, frame);
-            child.page_flags.insert(page_start, child_flags);
+            set_page_entry(&mut child.mapped, page_start, frame);
+            set_page_entry(&mut child.page_flags, page_start, child_flags);
         }
         let cr3 = child.pml4.start_address().as_u64();
         Ok((child, cr3))
@@ -475,7 +539,7 @@ impl AddressSpace {
     /// writes too; this process drops its reference to the original.
     pub fn handle_cow_write(&mut self, virtual_address: u64) -> bool {
         let page_start = virtual_address & !(PAGE_BYTES - 1);
-        let Some(&(old_frame, original_flags)) = self.cow_pages.get(&page_start) else {
+        let Some((old_frame, original_flags)) = page_entry(&self.cow_pages, page_start) else {
             return false;
         };
         let Some(new_frame) = allocate_frame() else {
@@ -499,9 +563,9 @@ impl AddressSpace {
             return false;
         }
         self.user_frames.push(new_frame);
-        self.mapped.insert(page_start, new_frame);
-        self.page_flags.insert(page_start, original_flags);
-        self.cow_pages.remove(&page_start);
+        set_page_entry(&mut self.mapped, page_start, new_frame);
+        set_page_entry(&mut self.page_flags, page_start, original_flags);
+        let _ = take_page_entry(&mut self.cow_pages, page_start);
         // This space no longer maps the original frame. Drop exactly one of its
         // references; the other process (if any) keeps the frame alive.
         if let Some(index) = self

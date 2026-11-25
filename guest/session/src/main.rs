@@ -16,7 +16,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use gtos_sys::{FramebufferInfo, InputEvent, InputPoll, VFS_FILE};
+use gtos_sys::{FramebufferInfo, InputEvent, InputPoll, PollFd, VFS_FILE};
 use gtos_widgets::shell::{
     DesktopShell, LauncherRecord, ShellAction, ShellFocus, ShellLayout, ShellSessionAction,
     TrayItem, parse_launcher_records,
@@ -56,6 +56,23 @@ const KCM_FAILED: &[u8] = b"session kcm failed\r\n";
 const INPUT_FAILED: &[u8] = b"session input failed\r\n";
 const DISPATCH_FAILED: &[u8] = b"session dispatch failed\r\n";
 const SHUTDOWN_FAILED: &[u8] = b"session shutdown failed\r\n";
+
+/// Reads a descriptor only when it is already readable.
+///
+/// The service bus is polled repeatedly, so a plain blocking read on its empty
+/// notify pipe would stall the manager. Terminal readiness still lets `read`
+/// report EOF.
+fn read_if_ready(fd: u64, out: &mut [u8]) -> u64 {
+    let mut entries = [PollFd {
+        fd,
+        events: gtos_sys::POLLIN,
+        revents: 0,
+    }];
+    if gtos_sys::poll(&mut entries, Some(0)) == 0 {
+        return gtos_sys::ERROR;
+    }
+    gtos_sys::read(fd, out)
+}
 
 /// Fixed-width state records avoid leaving stale trailing bytes in FAT files.
 const STATE_STARTING: &[u8] = b"starting\n";
@@ -300,7 +317,7 @@ fn reap_children(children: &mut Vec<u64>) {
     let mut index = 0;
     while index < children.len() {
         let mut status = 0;
-        if gtos_sys::waitpid(children[index], &mut status) == children[index] {
+        if gtos_sys::try_waitpid(children[index], &mut status) == children[index] {
             children.remove(index);
         } else {
             index += 1;
@@ -358,7 +375,7 @@ impl ServiceBus {
     /// Takes the next queued `CONNECT <fd> <pid> <url>` notification.
     fn poll(&mut self) -> Option<(u64, Vec<u8>)> {
         let mut chunk = [0u8; 256];
-        match gtos_sys::read(self.notify_read, &mut chunk) {
+        match read_if_ready(self.notify_read, &mut chunk) {
             gtos_sys::ERROR | 0 => {}
             count => {
                 let length = usize::try_from(count).unwrap_or(0);
@@ -402,7 +419,7 @@ fn read_line(fd: u64, out: &mut Vec<u8>) -> bool {
     let deadline = gtos_sys::monotonic_ns().saturating_add(SERVICE_TIMEOUT_NS);
     let mut chunk = [0u8; 64];
     loop {
-        match gtos_sys::read(fd, &mut chunk) {
+        match read_if_ready(fd, &mut chunk) {
             gtos_sys::ERROR => {}
             0 => return false,
             count => {
@@ -505,7 +522,7 @@ fn poll_services(services: &mut [ManagedService], allow_restart: bool) -> bool {
             continue;
         }
         let mut status = 0;
-        if gtos_sys::waitpid(service.pid, &mut status) != service.pid {
+        if gtos_sys::try_waitpid(service.pid, &mut status) != service.pid {
             continue;
         }
         let id = String::from(ascii(&service.record.id));
@@ -695,7 +712,7 @@ fn verify_service_bus(bus: &mut ServiceBus, state: &mut SessionState<'_>) -> boo
     loop {
         ok &= pump_service_bus(bus, state);
         let mut status = 0;
-        if gtos_sys::waitpid(child, &mut status) == child {
+        if gtos_sys::try_waitpid(child, &mut status) == child {
             ok &= pump_service_bus(bus, state);
             return ok && status == 0;
         }

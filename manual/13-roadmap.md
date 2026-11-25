@@ -3,9 +3,13 @@
 - A frame pool that tracks bootloader-owned regions more precisely than `Usable`.
 - Richer signals with default actions, masks, pending sets, fatal dispositions,
   delivery after `sigreturn`, hardware-fault delivery for ring-3 CPU exceptions,
-  64-bit signal masks with RT signal-number support, and cross-process
-  pipe-synchronised tests are now in place. FIFO-queued RT payloads (`siginfo`)
-  remain future work.
+  64-bit signal masks with RT signal-number support, FIFO-queued RT payloads
+  (`siginfo`), blocking `sigtimedwait`/`sigwaitinfo` with timeouts,
+  `signalfd`-style descriptor waits, `poll` and `select` multiplexing across
+  pipes, sockets and signal descriptors, event-driven readiness wakeups for
+  blocking multiplexed waits, ordinary `read`/`write`, child-exit waits through
+  `waitpid`, `pipe2` creation flags, and cross-process pipe-synchronised tests
+  are now in place.
 - A richer guest SDK (`std`-compatible facade, allocator reuse, Rust `main` support).
 - Extend the clean-room widget toolkit (`gtos-widgets`) beyond its themes,
   nested declarative views, multi-line editing and accessibility hooks: add a
@@ -20,8 +24,8 @@
   cross-process calls. Plasma-compatible applets, KCMs, runners and a full
   service manager are still future work; none of this imports Plasma or Qt code.
 - A full C/C++ runtime for guest programs: `crt0` with `errno`, `malloc`, string
-  routines and `atexit` is already available; a dynamic linker, C++ ABI and
-  `std`-compatible facade are still needed.
+  routines, `atexit` and kernel-supplied `argc`/`argv` is already available; a
+  dynamic linker, C++ ABI and `std`-compatible facade are still needed.
 - Move the remaining in-kernel `file`/`sys` resources behind VFS-backed registered schemes.
 - Extend shared-memory scheme transport with zero-copy guest mapping and explicit
   flow control (the kernel-retained byte ring is now available through `shmbind`).
@@ -45,7 +49,8 @@ plus reference-counted shared memory (`shmcreate`/`shmattach`/`shmdetach`/`shmde
 that can back compositor windows directly, bounded `pipe()` streams for
 incremental cross-process I/O, `schemeregister`/`schemeunregister` for
 pipe-backed user-space scheme servers, `shmbind` for shared-memory scheme
-streams, descriptor `ioctl` queries, a Rust-only C ABI shim, incremental FAT16
+streams, descriptor `ioctl` queries, a Rust-only C ABI shim with pipe,
+duplication, `fcntl`, `socketpair` and `shutdown` wrappers, incremental FAT16
 file descriptors with a bounded LRU cluster cache, dirty write-back and
 descriptor-based directory streaming, and a VFS with mount points, path
 resolution, `stat`/`readdir` and per-process working directories.

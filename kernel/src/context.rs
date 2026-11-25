@@ -41,16 +41,66 @@ pub struct Context {
     pub cr3: u64,
 }
 
+// Catch any future field addition that would make a `Context` wider than the
+// 20-slot frame plus its explicit CR3 slot.
+const _: () = assert!(core::mem::size_of::<Context>() == (FRAME_SLOTS + 1) * 8);
+
 impl Context {
+    /// Reads a saved context from a live syscall/timer register frame.
+    ///
+    /// The frame has [`FRAME_SLOTS`] entries and does not contain `cr3`; the
+    /// caller supplies the address-space value that belongs with the context.
+    ///
+    /// # Safety
+    ///
+    /// `frame` must point at [`FRAME_SLOTS`] readable `u64` values, such as the
+    /// register frame built by `syscall_interrupt` or `timer_interrupt`.
+    #[must_use]
+    pub unsafe fn from_frame(frame: *const u64, cr3: u64) -> Self {
+        // SAFETY: the caller guarantees the frame has `FRAME_SLOTS` readable
+        // entries.
+        let slots = unsafe { core::slice::from_raw_parts(frame, FRAME_SLOTS) };
+        Self {
+            rax: slots[0],
+            rcx: slots[1],
+            rdx: slots[2],
+            rsi: slots[3],
+            rdi: slots[4],
+            r8: slots[5],
+            r9: slots[6],
+            r10: slots[7],
+            r11: slots[8],
+            rbx: slots[9],
+            rbp: slots[10],
+            r12: slots[11],
+            r13: slots[12],
+            r14: slots[13],
+            r15: slots[14],
+            rip: slots[15],
+            cs: slots[16],
+            rflags: slots[17],
+            rsp: slots[18],
+            ss: slots[19],
+            cr3,
+        }
+    }
+
     /// Builds an initial context that enters `entry` with `user_stack` in ring 3.
     #[must_use]
     pub fn initial(entry: u64, user_stack: u64, cr3: u64) -> Self {
+        Self::initial_with_args(entry, user_stack, cr3, 0, 0)
+    }
+
+    /// Builds an initial context with the C ABI's first two arguments set.
+    #[must_use]
+    #[allow(clippy::similar_names)]
+    pub fn initial_with_args(entry: u64, user_stack: u64, cr3: u64, argc: u64, argv: u64) -> Self {
         Self {
             rax: 0,
             rcx: 0,
             rdx: 0,
-            rsi: 0,
-            rdi: 0,
+            rsi: argv,
+            rdi: argc,
             r8: 0,
             r9: 0,
             r10: 0,

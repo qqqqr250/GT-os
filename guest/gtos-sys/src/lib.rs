@@ -32,7 +32,7 @@ const SYS_BRK: u64 = 6;
 const SYS_YIELD: u64 = 7;
 /// `fork()`.
 const SYS_FORK: u64 = 8;
-/// `exec(image, length)`.
+/// `exec(image, length, args)`, where `args` is a length-prefixed argument block.
 const SYS_EXEC: u64 = 9;
 /// `waitpid(pid, status, options)`.
 const SYS_WAITPID: u64 = 10;
@@ -48,7 +48,7 @@ const SYS_REALTIME: u64 = 14;
 const SYS_LSEEK: u64 = 15;
 /// `signal(signum, handler)`.
 const SYS_SIGNAL: u64 = 16;
-/// `kill(pid, signum)`.
+/// `kill(pid, signum, info)`.
 const SYS_KILL: u64 = 17;
 /// `sigreturn(frame)`.
 const SYS_SIGRETURN: u64 = 18;
@@ -104,17 +104,197 @@ const SYS_GETCWD: u64 = 42;
 const SYS_SHMBIND: u64 = 43;
 /// `ioctl(fd, request, arg)`.
 const SYS_IOCTL: u64 = 44;
-/// `sigprocmask(how, set, oldset)`.
+/// `sigprocmask(how, set, oldset)` with 64-bit masks.
 const SYS_SIGPROCMASK: u64 = 45;
-/// `sigpending(set)`.
+/// `sigpending(set)` with a 64-bit mask.
 const SYS_SIGPENDING: u64 = 46;
 /// `socketpair(domain, type, fds)`.
 const SYS_SOCKETPAIR: u64 = 47;
+/// `dup(fd)`.
+const SYS_DUP: u64 = 48;
+/// `dup2(oldfd, newfd)`.
+const SYS_DUP2: u64 = 49;
+/// `shutdown(fd, how)`.
+const SYS_SHUTDOWN: u64 = 50;
+/// `fcntl(fd, cmd, arg)`.
+const SYS_FCNTL: u64 = 51;
+/// `sigtimedwait(set, info, timeout_ms)`.
+const SYS_SIGTIMEDWAIT: u64 = 52;
+/// `signalfd(mask, flags)`.
+const SYS_SIGNALFD: u64 = 53;
+/// `poll(fds, length, timeout_ms)`.
+const SYS_POLL: u64 = 54;
+/// `select(args)`.
+const SYS_SELECT: u64 = 55;
+/// `pipe2(fds, flags)`.
+const SYS_PIPE2: u64 = 56;
 
 /// Unix-domain socket family.
 pub const AF_UNIX: u64 = 1;
+/// Connection-oriented byte stream socket.
+pub const SOCK_STREAM: u64 = 1;
 /// Connection-oriented datagram socket that preserves message boundaries.
 pub const SOCK_SEQPACKET: u64 = 5;
+/// Create the socket pair with nonblocking endpoints.
+pub const SOCK_NONBLOCK: u64 = 0x0800;
+/// Create the socket pair with close-on-exec endpoints.
+pub const SOCK_CLOEXEC: u64 = 0x8_0000;
+
+/// `shutdown`: disable further receives.
+pub const SHUT_RD: u64 = 0;
+/// `shutdown`: disable further sends.
+pub const SHUT_WR: u64 = 1;
+/// `shutdown`: disable further sends and receives.
+pub const SHUT_RDWR: u64 = 2;
+
+/// `waitpid`: return zero immediately instead of parking on a live child.
+pub const WNOHANG: u64 = 1;
+
+/// `fcntl`: get file descriptor flags.
+pub const F_GETFD: u64 = 1;
+/// `fcntl`: set file descriptor flags.
+pub const F_SETFD: u64 = 2;
+/// `fcntl`: get file status flags.
+pub const F_GETFL: u64 = 3;
+/// `fcntl`: set file status flags.
+pub const F_SETFL: u64 = 4;
+/// Close-on-exec file descriptor flag.
+pub const FD_CLOEXEC: u64 = 1;
+/// Nonblocking file status flag.
+pub const O_NONBLOCK: u64 = 1;
+/// Close-on-exec flag accepted by `pipe2`.
+pub const O_CLOEXEC: u64 = 0x8_0000;
+/// Create a signal descriptor whose empty reads fail instead of blocking.
+pub const SFD_NONBLOCK: u64 = 0x0800;
+/// Close a signal descriptor on `exec`.
+pub const SFD_CLOEXEC: u64 = 0x0008_0000;
+
+/// `poll`: the descriptor is readable.
+pub const POLLIN: u16 = 0x0001;
+/// `poll`: the descriptor is writable.
+pub const POLLOUT: u16 = 0x0004;
+/// `poll`: the descriptor is in an error state.
+pub const POLLERR: u16 = 0x0008;
+/// `poll`: the peer closed the connection.
+pub const POLLHUP: u16 = 0x0010;
+/// `poll`: the descriptor number is not open.
+pub const POLLNVAL: u16 = 0x0020;
+
+/// One readiness request for [`poll`].
+///
+/// The kernel writes `revents` in place; callers should initialise it to zero
+/// with [`PollFd::new`]. The layout is deliberately identical in ring 0 and
+/// ring 3.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PollFd {
+    /// Descriptor number to query.
+    pub fd: u64,
+    /// Requested events, an OR of [`POLLIN`] and [`POLLOUT`].
+    pub events: u16,
+    /// Events reported by the kernel.
+    pub revents: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<PollFd>() == 16);
+
+impl PollFd {
+    /// Creates a request with no reported events yet.
+    #[must_use]
+    pub const fn new(fd: u64, events: u16) -> Self {
+        Self {
+            fd,
+            events,
+            revents: 0,
+        }
+    }
+}
+
+/// Number of `u64` words in one [`FdSet`].
+const FD_SET_WORDS: usize = 16;
+/// Number of descriptor bits in one [`FdSet`].
+pub const FD_SETSIZE: usize = FD_SET_WORDS * 64;
+
+/// One descriptor bitmask for [`select`].
+///
+/// The kernel rewrites the set with the ready subset on return, so callers that
+/// retry with a shorter timeout should restore their original bits first.
+/// Sixteen `u64` words let late descriptor numbers participate instead of
+/// forcing guests to renumber their tables.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FdSet {
+    words: [u64; FD_SET_WORDS],
+}
+
+const _: () = assert!(core::mem::size_of::<FdSet>() == 128);
+
+impl FdSet {
+    /// Creates an empty descriptor set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            words: [0; FD_SET_WORDS],
+        }
+    }
+
+    /// Adds `fd`, returning `false` when it is outside [`FD_SETSIZE`].
+    pub fn insert(&mut self, fd: u64) -> bool {
+        let Some(word) = usize::try_from(fd / 64).ok().filter(|word| *word < FD_SET_WORDS) else {
+            return false;
+        };
+        self.words[word] |= 1u64 << (fd % 64);
+        true
+    }
+
+    /// Removes `fd`, returning `false` when it is outside [`FD_SETSIZE`].
+    pub fn remove(&mut self, fd: u64) -> bool {
+        let Some(word) = usize::try_from(fd / 64).ok().filter(|word| *word < FD_SET_WORDS) else {
+            return false;
+        };
+        self.words[word] &= !(1u64 << (fd % 64));
+        true
+    }
+
+    /// Reports whether `fd` is present.
+    #[must_use]
+    pub fn contains(&self, fd: u64) -> bool {
+        let Ok(word) = usize::try_from(fd / 64) else {
+            return false;
+        };
+        word < FD_SET_WORDS && self.words[word] & (1u64 << (fd % 64)) != 0
+    }
+
+    /// Removes every descriptor from the set.
+    pub fn clear(&mut self) {
+        self.words = [0; FD_SET_WORDS];
+    }
+
+    /// Reports whether the set is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|word| *word == 0)
+    }
+
+    /// Returns the raw words shared with the kernel ABI.
+    #[must_use]
+    pub const fn words(&self) -> [u64; FD_SET_WORDS] {
+        self.words
+    }
+}
+
+/// Private argument block shared with the kernel for [`select`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SelectArgs {
+    nfds: u64,
+    readfds: u64,
+    writefds: u64,
+    exceptfds: u64,
+    timeout_ms: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<SelectArgs>() == 40);
 
 /// Largest shared-memory region the kernel will create.
 pub const SHM_MAX_BYTES: u64 = 0x0008_0000;
@@ -137,11 +317,24 @@ pub const SIGSEGV: u8 = 11;
 pub const SIGUSR2: u8 = 12;
 /// Termination request; terminates by default.
 pub const SIGTERM: u8 = 15;
+/// First real-time signal. These signals queue instead of coalescing.
+pub const SIGRTMIN: u8 = 34;
+/// Last real-time signal.
+pub const SIGRTMAX: u8 = 64;
 
 /// Reset a signal to its default disposition.
 pub const SIG_DFL: u64 = 0;
 /// Ignore a signal explicitly.
 pub const SIG_IGN: u64 = 1;
+
+/// `siginfo`: sent by `kill` from a user process.
+pub const SI_USER: u64 = 1;
+/// `siginfo`: sent with an explicit value through the `sigqueue` helper.
+pub const SI_QUEUE: u64 = 2;
+/// `siginfo`: generated by the kernel.
+pub const SI_KERNEL: u64 = 3;
+/// `siginfo`: generated by a CPU fault.
+pub const SI_FAULT: u64 = 4;
 
 /// Add the signals in a mask to the blocked set.
 pub const SIG_BLOCK: u8 = 0;
@@ -150,16 +343,44 @@ pub const SIG_UNBLOCK: u8 = 1;
 /// Replace the blocked set with a mask.
 pub const SIG_SETMASK: u8 = 2;
 
-/// The mask bit for one signal number.
-#[must_use]
-pub const fn signal_bit(signum: u8) -> u32 {
-    1_u32 << (signum - 1)
+/// Internal syscall result used by blocking wait paths.
+///
+/// The kernel returns this when it had to suspend the caller; [`sigtimedwait`],
+/// [`read`] on a signal descriptor, [`poll`] and [`select`] yield and retry so
+/// guests never observe it directly.
+pub const SIGWAIT_RETRY: u64 = u64::MAX - 1;
+
+/// Signal information passed to a handler as its third argument.
+///
+/// The `si_` names mirror the kernel's stable clean-room C ABI.
+#[allow(clippy::struct_field_names)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Siginfo {
+    /// The signal number, filled in by the kernel.
+    pub si_signo: u64,
+    /// One of the `SI_*` codes above.
+    pub si_code: u64,
+    /// The sending process, or 0 when the kernel sent it.
+    pub si_pid: u64,
+    /// The value supplied to `sigqueue`.
+    pub si_value: u64,
+    /// The fault address for synchronous CPU signals.
+    pub si_addr: u64,
 }
 
-/// A signal handler entered with the signal number and a saved register frame.
+const _: () = assert!(core::mem::size_of::<Siginfo>() == 40);
+
+/// The mask bit for one signal number.
+#[must_use]
+pub const fn signal_bit(signum: u8) -> u64 {
+    1_u64 << (signum - 1)
+}
+
+/// A signal handler entered with `(signum, saved_frame, siginfo)`.
 ///
 /// Handlers must call [`sigreturn`]; returning normally jumps to address 0.
-pub type SignalHandler = extern "C" fn(u64, *mut u64) -> !;
+pub type SignalHandler = extern "C" fn(u64, *mut u64, *const Siginfo) -> !;
 
 /// Unknown or driver-specific pixel channel order.
 pub const PIXEL_FORMAT_UNKNOWN: u32 = 0;
@@ -391,6 +612,8 @@ pub const IOCTL_FILE_SIZE: u64 = 3;
 pub const IOCTL_FILE_TRUNCATE: u64 = 4;
 /// `ioctl`: flush a writable file descriptor to disk.
 pub const IOCTL_FILE_SYNC: u64 = 5;
+/// `ioctl`: peer process identifier of a socket/stream connection.
+pub const IOCTL_SOCKET_PEER_PID: u64 = 6;
 
 /// The value the kernel returns for a failed syscall.
 pub const ERROR: u64 = u64::MAX;
@@ -540,15 +763,119 @@ fn syscall(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
 
 /// Writes `bytes` to a file descriptor, returning the number of bytes written
 /// or [`ERROR`].
+///
+/// A blocking descriptor with no free space can suspend the caller and resume
+/// it with [`SIGWAIT_RETRY`]. This wrapper hides that detail by yielding and
+/// retrying the original write.
 #[inline]
 pub fn write(fd: u64, bytes: &[u8]) -> u64 {
-    syscall(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64)
+    loop {
+        let result = syscall(SYS_WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64);
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
 }
 
 /// Reads up to `bytes.len()` bytes from a descriptor.
+///
+/// A blocking signal descriptor can suspend the caller and resume it with the
+/// private [`SIGWAIT_RETRY`] value. This wrapper hides that detail by yielding
+/// and retrying; ordinary descriptors never produce the sentinel.
 #[inline]
 pub fn read(fd: u64, bytes: &mut [u8]) -> u64 {
-    syscall(SYS_READ, fd, bytes.as_mut_ptr() as u64, bytes.len() as u64)
+    loop {
+        let result = syscall(SYS_READ, fd, bytes.as_mut_ptr() as u64, bytes.len() as u64);
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
+}
+
+/// Waits for readiness on several descriptors.
+///
+/// Returns the number of entries with a nonzero `revents`, `0` on timeout, or
+/// [`ERROR`] for bad arguments. `None` means wait indefinitely. When the kernel
+/// suspends the caller it returns [`SIGWAIT_RETRY`]; this wrapper hides that and
+/// recomputes the remaining time before retrying.
+#[inline]
+pub fn poll(fds: &mut [PollFd], timeout_ms: Option<u64>) -> u64 {
+    if fds.len() > 64 {
+        return ERROR;
+    }
+    let timeout = timeout_ms.unwrap_or(u64::MAX);
+    let started = uptime();
+    loop {
+        let elapsed = uptime().saturating_sub(started);
+        let remaining = if timeout == u64::MAX {
+            u64::MAX
+        } else {
+            timeout.saturating_sub(elapsed)
+        };
+        let result = syscall(
+            SYS_POLL,
+            fds.as_mut_ptr() as u64,
+            fds.len() as u64,
+            remaining,
+        );
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
+}
+
+/// Waits for readiness using classic fd bitmasks.
+///
+/// Each supplied [`FdSet`] starts as the requested descriptors and becomes the
+/// ready subset on return. Read sets report `POLLIN`, write sets report
+/// `POLLOUT`, and exception sets report `POLLERR`, `POLLHUP` or `POLLNVAL`.
+/// Returns the number of ready bits, `0` on timeout, or [`ERROR`] for bad
+/// arguments. `None` means wait indefinitely. A wake is hidden behind
+/// [`SIGWAIT_RETRY`] just like [`poll`], with the remaining timeout recomputed.
+#[inline]
+pub fn select(
+    readfds: Option<&mut FdSet>,
+    writefds: Option<&mut FdSet>,
+    exceptfds: Option<&mut FdSet>,
+    timeout_ms: Option<u64>,
+) -> u64 {
+    let read_pointer = match readfds {
+        Some(set) => set as *mut FdSet as u64,
+        None => 0,
+    };
+    let write_pointer = match writefds {
+        Some(set) => set as *mut FdSet as u64,
+        None => 0,
+    };
+    let except_pointer = match exceptfds {
+        Some(set) => set as *mut FdSet as u64,
+        None => 0,
+    };
+    let timeout = timeout_ms.unwrap_or(u64::MAX);
+    let started = uptime();
+    let mut args = SelectArgs {
+        nfds: FD_SETSIZE as u64,
+        readfds: read_pointer,
+        writefds: write_pointer,
+        exceptfds: except_pointer,
+        timeout_ms: timeout,
+    };
+    loop {
+        let elapsed = uptime().saturating_sub(started);
+        args.timeout_ms = if timeout == u64::MAX {
+            u64::MAX
+        } else {
+            timeout.saturating_sub(elapsed)
+        };
+        let result = syscall(SYS_SELECT, &raw mut args as u64, 0, 0);
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
 }
 
 /// Opens a scheme URL or a VFS path such as `/sys/version`.
@@ -610,11 +937,35 @@ pub fn close(fd: u64) -> u64 {
     syscall(SYS_CLOSE, fd, 0, 0)
 }
 
+/// Duplicates a descriptor.
+#[inline]
+pub fn dup(fd: u64) -> u64 {
+    syscall(SYS_DUP, fd, 0, 0)
+}
+
+/// Duplicates a descriptor to a specific descriptor number.
+#[inline]
+pub fn dup2(oldfd: u64, newfd: u64) -> u64 {
+    syscall(SYS_DUP2, oldfd, newfd, 0)
+}
+
+/// Shuts down read and/or write sides of a socket/stream.
+#[inline]
+pub fn shutdown(fd: u64, how: u64) -> u64 {
+    syscall(SYS_SHUTDOWN, fd, how, 0)
+}
+
+/// Gets or sets file status flags.
+#[inline]
+pub fn fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    syscall(SYS_FCNTL, fd, cmd, arg)
+}
+
 /// Creates a bounded pipe, returning its `(read_fd, write_fd)` pair.
 ///
-/// A read from an empty pipe returns [`ERROR`] while a writer is still open;
-/// poll with [`yield_now`] until data or EOF arrives. EOF is reported as zero
-/// once every write end has closed. The descriptors survive `fork` and `exec`.
+/// An empty blocking pipe parks the caller until a writer sends data or closes;
+/// [`O_NONBLOCK`] instead reports [`ERROR`]. EOF is reported as zero once every
+/// write end has closed. The descriptors survive `fork` and `exec`.
 #[inline]
 pub fn pipe() -> Option<(u64, u64)> {
     let mut fds = [u64::MAX; 2];
@@ -624,21 +975,35 @@ pub fn pipe() -> Option<(u64, u64)> {
     Some((fds[0], fds[1]))
 }
 
+/// Creates a pipe with [`O_NONBLOCK`] and/or [`O_CLOEXEC`] set on both ends.
+#[inline]
+pub fn pipe2(flags: u64) -> Option<(u64, u64)> {
+    let mut fds = [u64::MAX; 2];
+    if syscall(SYS_PIPE2, fds.as_mut_ptr() as u64, flags, 0) != 0 {
+        return None;
+    }
+    Some((fds[0], fds[1]))
+}
+
 /// Creates a connected `AF_UNIX`/`SOCK_SEQPACKET` pair.
 ///
 /// Each `write` sends one whole datagram and each `read` receives exactly one.
 /// Empty sockets return [`ERROR`] until data arrives or the peer closes; once
-/// the peer closes, reads return zero. Descriptors survive `fork` and `exec`.
+/// the peer closes, reads return zero. Descriptors survive `fork` and, unless
+/// [`SOCK_CLOEXEC`] is used, `exec`.
 #[inline]
 pub fn socketpair() -> Option<(u64, u64)> {
+    socketpair_with(AF_UNIX, SOCK_SEQPACKET)
+}
+
+/// Creates a connected socket pair with explicit domain/type.
+///
+/// `SOCK_SEQPACKET` or `SOCK_STREAM` selects the transport, and
+/// [`SOCK_NONBLOCK`]/[`SOCK_CLOEXEC`] may be OR-ed into `socket_type`.
+#[inline]
+pub fn socketpair_with(domain: u64, socket_type: u64) -> Option<(u64, u64)> {
     let mut fds = [u64::MAX; 2];
-    if syscall(
-        SYS_SOCKETPAIR,
-        AF_UNIX,
-        SOCK_SEQPACKET,
-        fds.as_mut_ptr() as u64,
-    ) != 0
-    {
+    if syscall(SYS_SOCKETPAIR, domain, socket_type, fds.as_mut_ptr() as u64) != 0 {
         return None;
     }
     Some((fds[0], fds[1]))
@@ -694,16 +1059,61 @@ pub fn fork() -> u64 {
     syscall(SYS_FORK, 0, 0, 0)
 }
 
-/// Replaces the current image with an ELF or flat binary.
+/// Replaces the current image with an ELF or flat binary and a packed command line.
+///
+/// `args` is a sequence of NUL-terminated strings followed by one extra NUL
+/// byte. The kernel copies it before abandoning the old address space.
 #[inline]
-pub fn exec(image: &[u8]) -> u64 {
-    syscall(SYS_EXEC, image.as_ptr() as u64, image.len() as u64, 0)
+pub fn exec_with_args(image: &[u8], args: &[u8]) -> u64 {
+    const HEADER_BYTES: usize = 8;
+    const MAX_BLOCK_BYTES: usize = 4096;
+    if args.len() > MAX_BLOCK_BYTES - HEADER_BYTES {
+        return ERROR;
+    }
+    let mut block = [0u8; MAX_BLOCK_BYTES];
+    block[..HEADER_BYTES].copy_from_slice(&(args.len() as u64).to_ne_bytes());
+    block[HEADER_BYTES..HEADER_BYTES + args.len()].copy_from_slice(args);
+    syscall(
+        SYS_EXEC,
+        image.as_ptr() as u64,
+        image.len() as u64,
+        block.as_ptr() as u64,
+    )
 }
 
-/// Polls a child's exit status; `status` receives the status on success.
+/// Replaces the current image with an ELF or flat binary.
+///
+/// The new image receives a synthetic `argv[0]` of `"gtos"`.
+#[inline]
+pub fn exec(image: &[u8]) -> u64 {
+    exec_with_args(image, b"gtos\0\0")
+}
+
+/// Waits for a child's exit status; `status` receives the status on success.
+///
+/// A live child parks the caller and resumes it with [`SIGWAIT_RETRY`]. This
+/// wrapper hides that detail by retrying until the child exits or the target is
+/// gone.
 #[inline]
 pub fn waitpid(pid: u64, status: &mut u64) -> u64 {
-    syscall(SYS_WAITPID, pid, status as *mut u64 as u64, 0)
+    loop {
+        let result = syscall(SYS_WAITPID, pid, status as *mut u64 as u64, 0);
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
+}
+
+/// Checks a child's exit status without blocking; returns zero while it lives.
+#[inline]
+pub fn try_waitpid(pid: u64, status: &mut u64) -> u64 {
+    syscall(
+        SYS_WAITPID,
+        pid,
+        status as *mut u64 as u64,
+        WNOHANG,
+    )
 }
 
 /// Sleeps for at least `milliseconds`, letting peer processes run.
@@ -761,21 +1171,103 @@ pub fn kill(pid: u64, signum: u8) -> u64 {
     syscall(SYS_KILL, pid, u64::from(signum), 0)
 }
 
-/// Adjusts or queries the caller's blocked signal mask.
+/// Sends a real-time signal with a 64-bit payload.
+///
+/// This is the `sigqueue` operation expressed through the existing `kill`
+/// syscall: the third argument is a pointer to a kernel-validated `Siginfo`.
+#[inline]
+pub fn sigqueue(pid: u64, signum: u8, value: u64) -> u64 {
+    let info = Siginfo {
+        si_signo: u64::from(signum),
+        si_code: SI_QUEUE,
+        si_pid: getpid(),
+        si_value: value,
+        si_addr: 0,
+    };
+    syscall(
+        SYS_KILL,
+        pid,
+        u64::from(signum),
+        &raw const info as *const Siginfo as u64,
+    )
+}
+
+/// Adjusts or queries the caller's 64-bit blocked signal mask.
 ///
 /// A `None` set leaves the mask unchanged while still returning the old mask in
 /// `oldset`, which makes it a convenient query operation.
 #[inline]
-pub fn sigprocmask(how: u8, set: Option<&u32>, oldset: Option<&mut u32>) -> u64 {
-    let set_pointer = set.map_or(0, |value| value as *const u32 as u64);
-    let old_pointer = oldset.map_or(0, |value| value as *mut u32 as u64);
+pub fn sigprocmask(how: u8, set: Option<&u64>, oldset: Option<&mut u64>) -> u64 {
+    let set_pointer = set.map_or(0, |value| value as *const u64 as u64);
+    let old_pointer = oldset.map_or(0, |value| value as *mut u64 as u64);
     syscall(SYS_SIGPROCMASK, u64::from(how), set_pointer, old_pointer)
 }
 
-/// Writes the caller's pending signal set into `set`.
+/// Writes the caller's 64-bit pending signal set into `set`.
 #[inline]
-pub fn sigpending(set: &mut u32) -> u64 {
-    syscall(SYS_SIGPENDING, set as *mut u32 as u64, 0, 0)
+pub fn sigpending(set: &mut u64) -> u64 {
+    syscall(SYS_SIGPENDING, set as *mut u64 as u64, 0, 0)
+}
+
+/// Waits for a blocked signal from `set`, consuming it and returning its number.
+///
+/// `timeout_ms` is `None` for an indefinite wait. `Some(0)` polls once. The raw
+/// kernel syscall may return [`SIGWAIT_RETRY`] after a wakeup; this wrapper
+/// hides that detail by yielding and retrying until a result is available.
+#[inline]
+pub fn sigtimedwait(set: &u64, info: &mut Siginfo, timeout_ms: Option<u64>) -> u64 {
+    let set_pointer = set as *const u64 as u64;
+    let info_pointer = info as *mut Siginfo as u64;
+    let timeout = timeout_ms.unwrap_or(u64::MAX);
+    loop {
+        let result = syscall(SYS_SIGTIMEDWAIT, set_pointer, info_pointer, timeout);
+        if result != SIGWAIT_RETRY {
+            return result;
+        }
+        yield_now();
+    }
+}
+
+/// Indefinite form of [`sigtimedwait`].
+#[inline]
+pub fn sigwaitinfo(set: &u64, info: &mut Siginfo) -> u64 {
+    sigtimedwait(set, info, None)
+}
+
+/// Waits for a blocked signal and discards its payload.
+#[inline]
+pub fn sigwait(set: &u64) -> u64 {
+    let mut info = Siginfo::default();
+    sigwaitinfo(set, &mut info)
+}
+
+/// Creates a descriptor that reads pending signals from `set`.
+///
+/// Every signal in `set` must already be blocked. `flags` may contain
+/// [`SFD_NONBLOCK`] and/or [`SFD_CLOEXEC`]. Each successful [`read`] of the
+/// descriptor returns one 40-byte `Siginfo`; an empty blocking descriptor waits
+/// for a matching signal, while a nonblocking one returns [`ERROR`].
+#[inline]
+pub fn signalfd(set: &u64, flags: u64) -> Option<u64> {
+    let fd = syscall(
+        SYS_SIGNALFD,
+        set as *const u64 as u64,
+        flags,
+        0,
+    );
+    (fd != ERROR).then_some(fd)
+}
+
+/// Reads one signal record from a descriptor created by [`signalfd`].
+#[inline]
+pub fn signalfd_read(fd: u64, info: &mut Siginfo) -> u64 {
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (info as *mut Siginfo).cast::<u8>(),
+            core::mem::size_of::<Siginfo>(),
+        )
+    };
+    read(fd, bytes)
 }
 
 /// Restores the register frame passed to a signal handler.

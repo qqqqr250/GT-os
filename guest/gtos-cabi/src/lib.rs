@@ -44,6 +44,44 @@ pub const IOCTL_FILE_SYNC: u64 = 5;
 /// The value the kernel returns for a failed syscall.
 pub const GTOS_ERROR: u64 = u64::MAX;
 
+/// `waitpid`: return zero immediately instead of parking on a live child.
+pub const WNOHANG: i32 = 1;
+
+/// `fcntl`: get file descriptor flags.
+pub const F_GETFD: i32 = 1;
+/// `fcntl`: set file descriptor flags.
+pub const F_SETFD: i32 = 2;
+/// `fcntl`: get file status flags.
+pub const F_GETFL: i32 = 3;
+/// `fcntl`: set file status flags.
+pub const F_SETFL: i32 = 4;
+/// Close-on-exec file descriptor flag.
+pub const FD_CLOEXEC: i32 = 1;
+/// Nonblocking file status flag.
+pub const O_NONBLOCK: i32 = 1;
+/// Close-on-exec flag accepted by `pipe2`.
+pub const O_CLOEXEC: i32 = 0x0008_0000;
+
+/// Unix-domain socket family.
+pub const AF_UNIX: i32 = 1;
+/// Connection-oriented byte stream socket.
+pub const SOCK_STREAM: i32 = 1;
+/// Connection-oriented datagram socket preserving message boundaries.
+pub const SOCK_SEQPACKET: i32 = 5;
+/// Create nonblocking socket endpoints.
+pub const SOCK_NONBLOCK: i32 = 0x0800;
+/// Create close-on-exec socket endpoints.
+pub const SOCK_CLOEXEC: i32 = 0x0008_0000;
+/// Disable further reads.
+pub const SHUT_RD: i32 = 0;
+/// Disable further writes.
+pub const SHUT_WR: i32 = 1;
+/// Disable both reads and writes.
+pub const SHUT_RDWR: i32 = 2;
+
+/// Private value returned when a blocking syscall suspends the caller.
+const SIGWAIT_RETRY: u64 = u64::MAX - 1;
+
 // Conventional POSIX errno values, kept small and stable for clean-room guests.
 /// No such file or directory.
 pub const ENOENT: i32 = 2;
@@ -167,6 +205,9 @@ fn path_arg(path: *const u8) -> Option<(u64, u64)> {
 
 /// Writes up to `count` bytes, returning the count or `-1` on error.
 ///
+/// A blocked write resumes with a private sentinel; the wrapper yields and
+/// retries so callers only ever see a byte count or `-1`.
+///
 /// # Safety
 ///
 /// `buffer` must be readable for `count` bytes when `count` is nonzero.
@@ -175,16 +216,22 @@ pub unsafe extern "C" fn write(fd: i32, buffer: *const u8, count: usize) -> isiz
     let (Some(fd), false) = (fd_arg(fd), buffer.is_null() && count != 0) else {
         return fail_isize(EBADF);
     };
-    let result = syscall(
-        1,
-        fd,
-        buffer as u64,
-        u64::try_from(count).unwrap_or(u64::MAX),
-    );
-    if is_error(result) {
-        fail_isize(EIO)
-    } else {
-        isize::try_from(result).unwrap_or(-1)
+    loop {
+        let result = syscall(
+            1,
+            fd,
+            buffer as u64,
+            u64::try_from(count).unwrap_or(u64::MAX),
+        );
+        if result == SIGWAIT_RETRY {
+            sched_yield();
+            continue;
+        }
+        return if is_error(result) {
+            fail_isize(EIO)
+        } else {
+            isize::try_from(result).unwrap_or(-1)
+        };
     }
 }
 
@@ -276,6 +323,138 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     }
 }
 
+/// Creates a bounded pipe and writes two descriptors into `fds`.
+///
+/// # Safety
+///
+/// `fds` must point at a writable two-element `i32` array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pipe(fds: *mut i32) -> i32 {
+    if fds.is_null() {
+        return fail_i32(EINVAL);
+    }
+    let mut slots = [u64::MAX; 2];
+    if syscall(36, slots.as_mut_ptr() as u64, 0, 0) != 0 {
+        return fail_i32(EINVAL);
+    }
+    // SAFETY: the caller guaranteed a writable two-element `i32` array.
+    unsafe {
+        *fds = i32::try_from(slots[0]).unwrap_or(-1);
+        *fds.add(1) = i32::try_from(slots[1]).unwrap_or(-1);
+    }
+    0
+}
+
+/// Creates a pipe with `O_NONBLOCK` and/or `O_CLOEXEC` set on both ends.
+///
+/// # Safety
+///
+/// `fds` must point at a writable two-element `i32` array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pipe2(fds: *mut i32, flags: i32) -> i32 {
+    if fds.is_null() {
+        return fail_i32(EINVAL);
+    }
+    let Ok(flags) = u64::try_from(flags) else {
+        return fail_i32(EINVAL);
+    };
+    let mut slots = [u64::MAX; 2];
+    if syscall(56, slots.as_mut_ptr() as u64, flags, 0) != 0 {
+        return fail_i32(EINVAL);
+    }
+    // SAFETY: the caller guaranteed a writable two-element `i32` array.
+    unsafe {
+        *fds = i32::try_from(slots[0]).unwrap_or(-1);
+        *fds.add(1) = i32::try_from(slots[1]).unwrap_or(-1);
+    }
+    0
+}
+
+/// Duplicates one descriptor, returning a new descriptor or `-1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn dup(fd: i32) -> i32 {
+    let Some(fd) = fd_arg(fd) else {
+        return fail_i32(EBADF);
+    };
+    match syscall(48, fd, 0, 0) {
+        result if is_error(result) => fail_i32(EBADF),
+        result => i32::try_from(result).unwrap_or(-1),
+    }
+}
+
+/// Duplicates `oldfd` onto `newfd`, returning `newfd` or `-1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn dup2(oldfd: i32, newfd: i32) -> i32 {
+    let (Some(oldfd), Some(newfd)) = (fd_arg(oldfd), fd_arg(newfd)) else {
+        return fail_i32(EBADF);
+    };
+    match syscall(49, oldfd, newfd, 0) {
+        result if is_error(result) => fail_i32(EBADF),
+        result => i32::try_from(result).unwrap_or(-1),
+    }
+}
+
+/// Gets or sets descriptor and status flags, returning the requested value.
+#[unsafe(no_mangle)]
+pub extern "C" fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
+    let Some(fd) = fd_arg(fd) else {
+        return fail_i32(EBADF);
+    };
+    let (Ok(cmd), Ok(arg)) = (u64::try_from(cmd), u64::try_from(arg)) else {
+        return fail_i32(EINVAL);
+    };
+    match syscall(51, fd, cmd, arg) {
+        result if is_error(result) => fail_i32(EINVAL),
+        result => i32::try_from(result).unwrap_or(-1),
+    }
+}
+
+/// Creates a connected socket pair and writes two descriptors into `fds`.
+///
+/// # Safety
+///
+/// `fds` must point at a writable two-element `i32` array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn socketpair(
+    domain: i32,
+    socket_type: i32,
+    protocol: i32,
+    fds: *mut i32,
+) -> i32 {
+    if fds.is_null() {
+        return fail_i32(EINVAL);
+    }
+    let (Ok(domain), Ok(socket_type), Ok(protocol)) = (
+        u64::try_from(domain),
+        u64::try_from(socket_type),
+        u64::try_from(protocol),
+    ) else {
+        return fail_i32(EINVAL);
+    };
+    let mut slots = [u64::MAX; 2];
+    if syscall(47, domain, socket_type | protocol, slots.as_mut_ptr() as u64) != 0 {
+        return fail_i32(EINVAL);
+    }
+    // SAFETY: the caller guaranteed a writable two-element `i32` array.
+    unsafe {
+        *fds = i32::try_from(slots[0]).unwrap_or(-1);
+        *fds.add(1) = i32::try_from(slots[1]).unwrap_or(-1);
+    }
+    0
+}
+
+/// Half-closes one socket or stream descriptor.
+#[unsafe(no_mangle)]
+pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
+    let (Some(fd), Ok(how)) = (fd_arg(fd), u64::try_from(how)) else {
+        return fail_i32(EINVAL);
+    };
+    match syscall(50, fd, how, 0) {
+        0 => 0,
+        _ => fail_i32(EBADF),
+    }
+}
+
 /// Returns the caller's process identifier.
 #[unsafe(no_mangle)]
 pub extern "C" fn getpid() -> i32 {
@@ -293,6 +472,9 @@ pub extern "C" fn fork() -> i32 {
 
 /// Waits for a child, writing its 64-bit status into `status` when non-null.
 ///
+/// A live child parks the caller with a private retry sentinel; the wrapper
+/// yields and retries so callers only observe a pid or `-1`.
+///
 /// # Safety
 ///
 /// `status` must be null or point at a writable `i32`.
@@ -302,12 +484,19 @@ pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i3
         return fail_i32(EINVAL);
     };
     let mut wide_status = 0u64;
-    let result = syscall(
-        10,
-        pid,
-        &raw mut wide_status as u64,
-        u64::try_from(options).unwrap_or(u64::MAX),
-    );
+    let result = loop {
+        let result = syscall(
+            10,
+            pid,
+            &raw mut wide_status as u64,
+            u64::try_from(options).unwrap_or(u64::MAX),
+        );
+        if result == SIGWAIT_RETRY {
+            sched_yield();
+            continue;
+        }
+        break result;
+    };
     if is_error(result) {
         return fail_i32(EINVAL);
     }
@@ -965,19 +1154,19 @@ pub extern "C" fn abort() -> ! {
 
 /// Supplies `_start`, an `argc`/`argv` call into `main`, and a panic handler.
 ///
-/// The guest declares `#![no_main]` and calls this macro once. C-style `main`
-/// receives a synthetic `argv[0]` of `"gtos"` because the kernel starts ring-3
-/// processes without a command line. At exit, the macro's call to [`exit`] runs
-/// any handlers registered through [`atexit`] before leaving the process.
+/// The guest declares `#![no_main]` and calls this macro once. The kernel seeds
+/// the initial stack with a conventional C argument frame and enters `_start`
+/// with `argc` in `rdi` and `argv` in `rsi`, so C-style `main` receives the real
+/// command line from the shell or `exec` syscall. At exit, the macro's call to
+/// [`exit`] runs any handlers registered through [`atexit`] before leaving the
+/// process.
 #[macro_export]
 macro_rules! gtos_cabi_main {
     ($main:path) => {
         #[unsafe(no_mangle)]
-        pub extern "C" fn _start() -> ! {
-            static PROGRAM: &[u8; 5] = b"gtos\0";
-            let argv = [PROGRAM.as_ptr(), core::ptr::null()];
+        pub extern "C" fn _start(argc: i32, argv: *const *const u8) -> ! {
             let entry: extern "C" fn(i32, *const *const u8) -> i32 = $main;
-            let status = entry(1, argv.as_ptr());
+            let status = entry(argc, argv);
             $crate::exit(status)
         }
 

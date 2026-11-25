@@ -57,6 +57,27 @@ and the existing checks (`cargo build`, clippy, fmt) passing.
 | 1.43 | `AF_UNIX`/`SOCK_SEQPACKET` `socketpair()` datagrams with boundary-preserving reads, nonblocking EOF, and fork/exec inheritance tests | done |
 | 1.44 | Ring-3 CPU fault delivery as signals (`SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE`) with handler/resume-or-terminate tests | done |
 | 1.45 | Real-time signal numbers (`SIGRTMIN..SIGRTMAX`) with 64-bit masks/pending sets and delivery tests | done |
+| 1.46 | `dup(fd)`/`dup2(oldfd, newfd)` descriptor duplication with shared handles and independent cursors | done |
+| 1.47 | `AF_UNIX`/`SOCK_STREAM` socketpair byte-stream endpoints | done |
+| 1.48 | `shutdown(fd, how)` for socket/stream read/write half-close | done |
+| 1.49 | `fcntl(F_GETFL/F_SETFL,O_NONBLOCK)` for socket/stream nonblocking I/O | done |
+| 1.50 | `socketpair` `SOCK_NONBLOCK` type flag for nonblocking endpoints | done |
+| 1.51 | `FD_CLOEXEC`/`F_GETFD`/`F_SETFD` with close-on-exec across `exec` | done |
+| 1.52 | `SOCK_CLOEXEC` type flag for close-on-exec socket pairs | done |
+| 1.53 | Socket peer credentials through `IOCTL_SOCKET_PEER_PID` | done |
+| 1.54 | FIFO-queued real-time signals with `sigqueue` `siginfo` payloads and a three-argument handler ABI | done |
+| 1.55 | Blocking `sigtimedwait`/`sigwaitinfo` with `siginfo` payloads, timeouts and cross-process wait tests | done |
+| 1.56 | `signalfd`-style descriptor waits with blocking/nonblocking reads and payload verification | done |
+| 1.57 | `poll` multiplexing across pipes, sockets and signal descriptors with timeout and `POLLNVAL` tests | done |
+| 1.58 | `select` fd-bitmask multiplexing with read/write/exception sets and timeout tests | done |
+| 1.59 | event-driven readiness wakeups for blocking `poll` and `select` waits | done |
+| 1.60 | event-driven blocking `read` on pipes and sockets with nonblocking and EOF behavior retained | done |
+| 1.61 | event-driven blocking `write` on full pipes and sockets with nonblocking and partial-write behavior retained | done |
+| 1.62 | event-driven blocking `waitpid` with atomic child-exit registration, `WNOHANG` probes and status verification | done |
+| 1.63 | `pipe2` with atomic `O_NONBLOCK`/`O_CLOEXEC` flags on both pipe ends | done |
+| 1.64 | C ABI descriptor wrappers for `pipe`, `pipe2`, `dup`, `dup2` and `fcntl` with demo verification | done |
+| 1.65 | C ABI `socketpair` and `shutdown` wrappers with datagram and half-close verification | done |
+| 1.66 | Kernel-seeded `argc`/`argv` for shell `run` and syscall 9 `exec`, verified through `CABI.ELF` | done |
 
 ## Phase 2 — Kernel infrastructure
 The physical frame pool, cluster-at-a-time FAT16 file `read`/`write`/`lseek`,
@@ -68,16 +89,36 @@ are flushed on eviction, explicit sync or close, and are invalidated when a
 chain is freed or reused. Signals now also support explicit ignore/default
 dispositions, fatal `SIGINT`/`SIGTERM`/`SIGKILL` actions, per-process masks with
 pending sets, and immediate delivery of signals queued by a handler after
-`sigreturn`. Local `AF_UNIX`/`SOCK_SEQPACKET` `socketpair()` datagrams are now available for
-boundary-preserving IPC, with fork/exec inheritance, nonblocking reads and EOF on
+`sigreturn`. Local `AF_UNIX` `socketpair()` now supports both `SOCK_SEQPACKET` datagrams and
+`SOCK_STREAM` byte streams, with fork/exec inheritance, nonblocking reads and EOF on
 peer close. Ring-3 CPU faults now enter the same signal path: `#DE` maps to `SIGFPE`,
 `#UD` to `SIGILL`, `#GP` to `SIGBUS`, and page faults map to `SIGSEGV` or
 `SIGBUS` depending on the error code. A handler can resume through `sigreturn`;
 ignored synchronous faults still terminate to avoid fault loops. Real-time
 signal numbers in `SIGRTMIN..SIGRTMAX` are accepted with 64-bit signal
-masks/pending sets; delivery currently coalesces per signal number. Still
-needed: FIFO RT queues/`siginfo` payloads, stream sockets, and socketpair
-options.
+masks/pending sets; unlike standard signals, they keep one queued `Siginfo`
+per send and arrive in strict send order. Socket pairs also accept
+`SOCK_NONBLOCK` and `SOCK_CLOEXEC` in their type flag, and
+`IOCTL_SOCKET_PEER_PID` exposes the peer process across socketpair and scheme
+connections. Signal wait APIs now consume blocked signals synchronously with
+`sigtimedwait`, `sigwaitinfo` and `sigwait`, including `Siginfo` payloads and
+finite timeouts. `signalfd` exposes the same pending set as a descriptor whose
+blocking `read` yields one `Siginfo` record at a time. `poll` now multiplexes
+readiness across pipes, sockets, signal descriptors and file-like resources with
+a stable 16-byte ABI and finite or infinite timeouts. `select` maps those answers
+onto 1024-bit fd sets with read, write and exception bitmasks. Blocking waits
+now arm a readiness registration under the process-table lock and wake directly
+when a descriptor or signal changes readiness, instead of sleeping in one-tick
+PIT slices. Ordinary blocking `read` uses the same registration, so an empty pipe
+or socket parks until a peer writes or closes; `O_NONBLOCK` still reports `ERROR`
+and end-of-file still reports `0`. A full blocking pipe or datagram socket parks
+until a reader frees capacity, while `O_NONBLOCK` and partial writes keep their
+existing behavior. `waitpid` checks the child's state and arms the caller's
+readiness registration in one critical section, so a parent parks directly on
+the child's exit instead of polling with `yield`; `WNOHANG` keeps an explicit
+nonblocking status probe for service managers. `pipe2` applies `O_NONBLOCK` and
+`O_CLOEXEC` to both ends before either descriptor is returned, matching the
+flag support already available for `socketpair`.
 
 ## Phase 3 — Graphics and input
 A first virtual framebuffer device is exposed through `fbinfo` and `fbcommit`:
@@ -92,7 +133,8 @@ so any process can post a short message that only the owner can read, plus a
 kernel-drawn border and title bar with `winsettitle`. `shm.rs` adds reference-counted
 shared-memory regions, and `winbindshm` can use them as window backing stores so
 `winpresent` repaints without another pixel copy. `pipe()` gives processes a
-bounded byte stream through the same descriptor syscalls, and
+bounded byte stream through the same descriptor syscalls; `pipe2()` creates one
+with `O_NONBLOCK` and/or `O_CLOEXEC` already applied to both ends, and
 `schemeregister`/`schemeunregister` let a ring-3 process serve a URL scheme over
 duplex stream connections, and `shmbind` can attach a retained SHM byte ring to
 one of those connections for payloads larger than the pipe buffer. Built-in
@@ -102,7 +144,12 @@ mapped scheme buffers and DRM/KMS-style abstractions.
 ## Phase 4 — Userspace runtime
 The Rust syscall crate and `gtos-cabi` runtime are in place: `_start` with
 `main(argc, argv)`, `errno`, a recycling `brk`-backed heap, clean-room string and
-`stdlib` routines, `puts`, an empty `environ` and LIFO `atexit` handlers. The
+`stdlib` routines, `puts`, an empty `environ` and LIFO `atexit` handlers. The C
+ABI also exposes `pipe`, `pipe2`, `dup`, `dup2`, `fcntl`, `socketpair` and
+`shutdown`, verified by `CABI.ELF` through a pipe round trip, flag checks, a
+datagram exchange and half-close EOF. The kernel now seeds a conventional C
+argument frame from shell tokens or a length-prefixed `exec` block, so
+`main(argc, argv)` sees the real command line instead of a synthetic one. The
 `gtos-widgets` adds a clipped canvas, shared 8x8 bitmap text, reusable
 vertical/horizontal/grid layouts, themed label/button/text-input widgets, a
 multi-line text view and editor, nested declarative views, scrolling with focus

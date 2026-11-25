@@ -7,12 +7,11 @@
 //! `iretq`. Ticks that interrupt ring 0 only keep time; they never preempt the
 //! shell.
 
-use crate::context::{self, Context};
+use crate::context;
 use crate::process::{self, Pid, State};
 use crate::usermode;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
-use x86_64::registers::control::Cr3;
 
 /// Round-robin starting point for the next `pick_next`.
 static CURSOR: AtomicU64 = AtomicU64::new(0);
@@ -91,6 +90,88 @@ pub fn sleep_current(pid: Pid, deadline: u64, frame: *mut u64) {
     process::with_process_mut(pid, process::Process::set_running);
 }
 
+/// Finishes a readiness wait armed by `sys_poll`, `sys_select`, `sys_read`,
+/// `sys_write` or `sys_waitpid`.
+///
+/// The process is already `Sleeping` with a readiness registration installed.
+/// This helper only publishes the retry sentinel and waits for either a direct
+/// readiness wake or the deadline.
+///
+/// # Safety
+///
+/// `frame` must point at the live register frame built by `syscall_interrupt`.
+/// If another process is runnable this never returns; the sleeper resumes later
+/// from its saved context. Otherwise the kernel waits with `hlt` until a peer
+/// becomes runnable, an event wake changes this process's state, or the deadline
+/// arrives.
+pub fn block_current_until_ready(pid: Pid, deadline: u64, frame: *mut u64) {
+    let sleeping = process::with_process_mut(pid, |process| {
+        if matches!(process.state(), State::Sleeping(_)) {
+            return true;
+        }
+        // A mutator may have woken us between arming the registration and this
+        // call. It cleared the registration and made us runnable; restore the
+        // running state because we never actually left the kernel.
+        if matches!(process.state(), State::Ready) {
+            process.set_running();
+        }
+        false
+    })
+    .unwrap_or(false);
+    if !sleeping {
+        return;
+    }
+    wait_until_woken(pid, deadline, frame);
+}
+
+/// Blocks `pid` until a signal in `mask` wakes it or `deadline` passes.
+///
+/// The pending check is part of the state change, so a signal queued just before
+/// the call is consumed by the caller instead of being missed. On wakeup the
+/// caller sees [`usermode::SIGWAIT_RETRY`] and retries its consume path.
+///
+/// # Safety
+///
+/// `frame` must point at the live register frame built by `syscall_interrupt`.
+/// If another process is runnable this never returns; the sleeper resumes later
+/// from its saved context. Otherwise the kernel waits with `hlt` until a peer
+/// becomes runnable or the deadline arrives.
+pub fn block_current_for_signal(pid: Pid, mask: u64, deadline: u64, frame: *mut u64) {
+    if !process::set_sleeping_unless_pending(pid, deadline, mask) {
+        // A matching signal is already pending, or the process disappeared.
+        // Either way the caller retries its consume path immediately.
+        return;
+    }
+    wait_until_woken(pid, deadline, frame);
+}
+
+/// Publishes the retry sentinel and waits out an already-armed sleep.
+fn wait_until_woken(pid: Pid, deadline: u64, frame: *mut u64) {
+    // SAFETY: `frame` is the live syscall register frame. The SDK wrappers
+    // recognise this value and retry after wakeup.
+    unsafe { *frame = crate::usermode::SIGWAIT_RETRY };
+    if let Some(next) = pick_next(pid) {
+        // SAFETY: `frame` is the live syscall frame and `next` has a valid saved
+        // context, kernel stack and page table.
+        unsafe { switch(pid, next, frame) };
+    }
+    while crate::interrupts::ticks() < deadline
+        && process::with_process(pid, |process| matches!(process.state(), State::Sleeping(_)))
+            .unwrap_or(false)
+    {
+        if let Some(next) = pick_next(pid) {
+            // SAFETY: `frame` is the live syscall frame of the sleeping process
+            // and `next` has a valid saved context, stack and page table.
+            unsafe { switch(pid, next, frame) };
+        }
+        interrupts::enable_and_hlt();
+    }
+    process::with_process_mut(pid, |process| {
+        process.set_running();
+        process.clear_readiness_wait();
+    });
+}
+
 /// Called by the `exit` syscall. Resumes another ready process if one exists;
 /// otherwise returns so the caller can unwind to the shell with `exit_user`.
 pub fn exit_current(frame: *mut u64) {
@@ -140,12 +221,11 @@ fn pick_next(current: Pid) -> Option<Pid> {
 /// `frame` must point at the live syscall register frame. Both processes must
 /// still be in the process table and own valid kernel stacks and page tables.
 unsafe fn switch(current: Pid, next: Pid, frame: *mut u64) -> ! {
-    let (active_pml4, _) = Cr3::read();
-    let mut saved = unsafe { *(frame as *const Context) };
-    saved.cr3 = active_pml4.start_address().as_u64();
-
+    // `switch_context` copies the 20 live frame slots and the active CR3 into
+    // the outgoing process's `Context`, so there is no Rust-side copy to make
+    // here. Reading a whole `Context` from the frame would read one slot past
+    // its 20-slot ABI.
     let old_ptr = process::with_process_mut(current, |process| {
-        process.set_context(saved);
         // An exiting process is already `Exited`; a yielding one goes back to
         // the ready queue.
         if process.state() == State::Running {

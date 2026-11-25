@@ -2,7 +2,7 @@
 
 Programs run with real hardware isolation. `kernel/src/usermode.rs` installs its
 own GDT (null, kernel code/data, user code/data and a TSS). The TSS
-`privilege_stack_table[0]` points at a 16 KiB ring-0 stack private to the running
+`privilege_stack_table[0]` points at a 128 KiB ring-0 stack private to the running
 process, and `interrupt_stack_table[0]` at a separate 16 KiB double-fault stack
 (post-06). Each process maps a private program window plus stack at PML4 entry 6
 (`0x0000_0300_0000_0000`), far from the kernel's identity map and the
@@ -12,28 +12,28 @@ loaded.
 
 The only way in is `int 0x80`, installed as a DPL-3 gate. The handler is written
 in `global_asm!`: it saves the user registers, calls the Rust dispatcher and
-`iretq`s back. Twenty-six system calls exist today:
+`iretq`s back. Fifty-six system calls (0 through 55) exist today:
 
 | Number | Call | Purpose |
 |--------|------|---------|
 | 0 | `exit(status)` | terminate the program |
 | 1 | `write(fd, buffer, length)` | write to console fd 1/2 or a writable scheme descriptor |
 | 2 | `open(url, length)` | open a scheme resource, returning fd >= 3 |
-| 3 | `read(fd, buffer, length)` | read bytes from a scheme descriptor |
+| 3 | `read(fd, buffer, length)` | read bytes from a scheme descriptor; one `Siginfo` record from a signal descriptor |
 | 4 | `close(fd)` | release a scheme descriptor |
 | 5 | `getpid()` | return the current process identifier |
 | 6 | `brk(address)` | grow or query the process heap |
 | 7 | `yield()` | run the async executor, then switch to another process if ready |
 | 8 | `fork()` | share pages copy-on-write and return 0 in the child |
-| 9 | `exec(image, length)` | replace the current image from a user buffer |
-| 10 | `waitpid(pid, status, options)` | poll a child's exit status and reap it; returns `ERROR` until it exits |
+| 9 | `exec(image, length, args)` | replace the current image from a user buffer; `args` is zero or a length-prefixed packed command line |
+| 10 | `waitpid(pid, status, options)` | wait for a child's exit status and reap it; parks until it exits, or returns zero with `WNOHANG` |
 | 11 | `sleep(milliseconds)` | block until the PIT deadline, letting peers run |
 | 12 | `uptime()` | return milliseconds since the PIT was initialized |
 | 13 | `clock_gettime()` | return monotonic nanoseconds interpolated with the TSC |
 | 14 | `realtime()` | return Unix seconds from the CMOS RTC |
 | 15 | `lseek(fd, offset, whence)` | move a descriptor's read/write cursor |
 | 16 | `signal(signum, handler)` | install a handler, returning the previous one |
-| 17 | `kill(pid, signum)` | queue a signal for a process, including the caller |
+| 17 | `kill(pid, signum, info)` | queue a signal; a null `info` is a plain kill, otherwise `info` is a `Siginfo*` carrying a queued payload |
 | 18 | `sigreturn(frame)` | restore the interrupted context and leave a handler |
 | 19 | `fbinfo(info)` | copy framebuffer geometry into a user buffer |
 | 20 | `fbcommit(buffer, length)` | blit a user shadow framebuffer to the display |
@@ -60,10 +60,19 @@ in `global_asm!`: it saves the user registers, calls the Rust dispatcher and
 | 41 | `chdir(path, length)` | set the caller's current VFS directory |
 | 42 | `getcwd(buffer, length)` | write the caller's current VFS directory |
 | 43 | `shmbind(fd, region)` | use a shared region as a scheme stream's byte transport |
-| 44 | `ioctl(fd, request, arg)` | query or adjust a descriptor (FIONREAD, FIONWRITE, file size/truncate/sync) |
+| 44 | `ioctl(fd, request, arg)` | query or adjust a descriptor (FIONREAD, FIONWRITE, file size/truncate/sync, socket peer PID) |
 | 45 | `sigprocmask(how, set, oldset)` | block, unblock or replace the signal mask and return the old mask |
 | 46 | `sigpending(set)` | write the pending signal set into a user buffer |
-| 47 | `socketpair(domain, type, fds)` | create two connected `AF_UNIX`/`SOCK_SEQPACKET` datagram endpoints |
+| 47 | `socketpair(domain, type, fds)` | create two connected `AF_UNIX` endpoints (`SOCK_SEQPACKET` or `SOCK_STREAM`); `SOCK_NONBLOCK` and `SOCK_CLOEXEC` may be ORed into `type` |
+| 48 | `dup(fd)` | duplicate a descriptor, sharing underlying handles |
+| 49 | `dup2(oldfd, newfd)` | duplicate a descriptor to a specific number, closing `newfd` first if open |
+| 50 | `shutdown(fd, how)` | half-close a socket/stream (`SHUT_RD`, `SHUT_WR`, `SHUT_RDWR`) |
+| 51 | `fcntl(fd, cmd, arg)` | get/set fd flags (`F_GETFD`/`F_SETFD`, `FD_CLOEXEC`) and file status flags (`F_GETFL`/`F_SETFL`, `O_NONBLOCK`) |
+| 52 | `sigtimedwait(set, info, timeout_ms)` | wait for a blocked signal, write its `Siginfo`, and return its number; `u64::MAX` is an infinite timeout |
+| 53 | `signalfd(set, flags)` | create a descriptor whose reads consume pending signals from `set`; `SFD_NONBLOCK` and `SFD_CLOEXEC` may be ORed into `flags` |
+| 54 | `poll(fds, length, timeout_ms)` | wait for readiness on an array of 16-byte `PollFd` records; `u64::MAX` is an infinite timeout |
+| 55 | `select(args)` | classic fd-bitmask multiplexing through a pointer to a 40-byte argument block; `u64::MAX` is an infinite timeout |
+| 56 | `pipe2(fds, flags)` | create a pipe with `O_NONBLOCK` and/or `O_CLOEXEC` applied to both ends |
 
 Every pointer argument is checked against the process's user region before it
 is dereferenced, so a program cannot name kernel memory even with a wrapping
@@ -87,7 +96,11 @@ design. Flat binaries are limited to the legacy 64 KiB code window; ELF images
 are mapped segment by segment and may be up to 1 MiB. A second seeded image,
 `CABI.ELF`, is compiled from Rust against the `gtos-cabi` runtime: it enters through
 `main(argc, argv)`, calls the raw `int 0x80` entry and uses C-style `open`,
-`read`, `write`, `close` and PID wrappers, all without importing libc. The shim
+`read`, `write`, `close`, `pipe`, `pipe2`, `dup`, `dup2`, `fcntl`, `socketpair`,
+`shutdown` and PID wrappers, all without importing libc. The shell and `exec`
+syscall seed the initial stack with the real command line and enter `_start`
+with `argc` in `rdi` and `argv` in `rsi`; with no explicit arguments the image
+receives a synthetic `argv[0]` of `"gtos"`. The shim
 also supplies `errno`/`__errno_location`, a `brk`-backed `malloc`/`calloc`/
 `realloc`/`free` heap with recycling, clean-room `string.h`/`stdlib.h` routines,
 `puts`, an empty `environ` and `atexit` handlers that `exit` runs on the way out.
@@ -267,23 +280,43 @@ close, while freeing or reusing a cluster invalidates its cached bytes.
 `open file:/` returns a directory descriptor whose `read` yields NUL-separated
 names incrementally instead of building a full listing in ring 3. Each process
 owns its descriptor table: `fork` gives the child a copy and `exec` leaves the table untouched, so
-one program cannot close another program's descriptors.
+one program cannot close another program's descriptors. `dup` and `dup2` create
+new descriptors for the same underlying stream and always start with a clear
+close-on-exec flag. `fcntl(F_GETFD/F_SETFD, FD_CLOEXEC)` marks a descriptor so
+the next successful `exec` closes it; the flag is copied by `fork` but cleared
+on duplicated descriptors. `fcntl(F_GETFL/F_SETFL, O_NONBLOCK)` controls
+nonblocking sockets and streams.
 
-`signal` installs a handler for signals 1–31; disposition `0` restores the
-default action and `1` explicitly ignores the signal. `kill` queues a signal to
-any live process; signalling your own PID delivers it before the next return to
-ring 3, and the 100 Hz timer also delivers pending signals. Delivery builds a
-synthetic call frame on the current user stack: the handler receives the signal
-number and a pointer to the saved register context, and must finish with
-`sigreturn(frame)` so the interrupted instruction resumes exactly where it
-stopped. Only one handler runs per process at a time. `SIGINT`, `SIGILL`, `SIGBUS`,
-`SIGFPE`, `SIGSEGV` and `SIGTERM` terminate by default; `SIGKILL` is always fatal
-and cannot be caught, ignored or blocked. Other unhandled signals are ignored.
-CPU faults taken in ring 3 are delivered through the same signal path when a
-handler is installed; a synchronous fault left ignored is still terminated to
-avoid re-executing the faulting instruction forever. Real-time signal numbers in `SIGRTMIN..=SIGRTMAX` are accepted and masked with
-64-bit masks/pending sets; current delivery coalesces one pending bit per signal
-number.
+`signal` installs a handler for signals 1–64; disposition `0` restores the
+default action and `1` explicitly ignores the signal. `kill(pid, signum, 0)`
+queues a signal to any live process; signalling your own PID delivers it before
+the next return to ring 3, and the 100 Hz timer also delivers pending signals.
+Passing a non-null `Siginfo*` instead is the clean-room `sigqueue` operation: the
+guest SDK exposes it as `sigqueue(pid, signum, value)`, which deliberately reuses
+syscall 17 with `rdx` set to the payload pointer. The kernel copies and validates
+the whole 40-byte structure before queueing it.
+
+Delivery builds a synthetic call frame on the current user stack. A handler is
+`extern "C" fn(u64, *mut u64, *const Siginfo) -> !`: it receives the signal
+number, a pointer to the saved 160-byte register frame, and a pointer to the
+`Siginfo` written immediately after that frame. `Siginfo` carries `si_signo`,
+`si_code`, `si_pid`, `si_value` and `si_addr`; codes are `SI_USER` for plain
+sends, `SI_QUEUE` for explicit values, `SI_KERNEL` for kernel-generated signals
+and `SI_FAULT` for CPU faults. The current CPU-fault path leaves `si_addr` at
+zero. The handler must finish with `sigreturn(frame)`, which restores only the
+20 register-frame slots. Only one handler runs per process at a time.
+
+Standard signals coalesce in a 64-bit pending mask and report the sender through
+an `SI_USER` payload. Real-time signals in `SIGRTMIN..=SIGRTMAX` (`34..=64`) instead
+keep one queued `Siginfo` per send and are delivered in strict send order, even
+when the same number is sent repeatedly. Blocked real-time signals stay queued
+and are skipped until unblocked; a bounded queue of 64 entries rejects further
+queued sends with `ERROR`. `SIGINT`, `SIGILL`, `SIGBUS`, `SIGFPE`, `SIGSEGV` and
+`SIGTERM` terminate by default; `SIGKILL` is always fatal and cannot be caught,
+ignored or blocked. Other unhandled signals are ignored. CPU faults taken in
+ring 3 are delivered through the same path with an `SI_FAULT` payload; a
+synchronous fault left ignored is still terminated to avoid re-executing the
+faulting instruction forever.
 
 `sigprocmask` blocks, unblocks or replaces a per-process bit mask, and
 `sigpending` reports signals that arrived while blocked. A blocked signal stays
@@ -292,6 +325,74 @@ A handler may also queue another signal: because delivery resumes at
 `sigreturn`, the newly pending handler runs immediately after the interrupted
 context is restored. `fork` copies dispositions and the mask but not pending
 signals, and `exec` preserves them.
+
+`sigtimedwait` consumes a blocked signal from a caller-supplied 64-bit set,
+writes its `Siginfo` into a user buffer and returns the signal number. The guest
+SDK exposes indefinite `sigwaitinfo` and payload-discarding `sigwait` wrappers;
+`Some(0)` polls once and `None` waits forever. The kernel requires every waited
+signal to be blocked so a handler cannot race the waiter, and `SIGKILL` can never
+be waited for. A blocked signal whose disposition is ignore is still queued for
+a waiter. Internally the kernel returns a private retry value when it suspends
+the caller; the SDK wrapper yields and retries so the blocking detail stays
+inside `gtos-sys`. The timeout uses the same 100 Hz clock as `sleep`, and a
+finite wait returns `ERROR` when it expires. The Rust guest has a child send a
+queued real-time payload while the parent waits, then checks the payload and a
+separate timeout.
+
+`signalfd` creates a descriptor that turns the same pending set into readable
+40-byte `Siginfo` records. Every signal in its set must already be blocked, and
+`SIGKILL` is excluded as usual. A blocking read consumes the next matching
+signal in the same order as `sigtimedwait` and waits on the signal wake path if
+none is pending; `SFD_NONBLOCK` makes an empty read return `ERROR` instead, and
+`SFD_CLOEXEC` closes the descriptor on `exec`. As with `sigtimedwait`, the kernel
+returns a private value when it suspends the caller, and the guest `read` wrapper
+yields and retries. The handle stores only the mask and flags, so a child that
+inherits the descriptor reads its own signals after `fork`. `fcntl` can change
+`O_NONBLOCK` on the descriptor. The Rust guest has a child send a queued payload
+while the parent performs a blocking `read`, then verifies the payload, pending
+cleanup, and a nonblocking empty read.
+
+Ordinary pipes and sockets now honour blocking `read` as well. An empty blocking
+descriptor arms the readiness generation together with the sleep state, and a
+peer write or half-close wakes the reader directly through the same path used by
+`poll` and `select`. `O_NONBLOCK` preserves the `ERROR` response for an empty
+queue, EOF remains `0`, and a successful read advances the generation so writers
+waiting for capacity can retry. The Rust guest tests both a byte pipe and a
+sequenced socket with a delayed child producer.
+
+Ordinary writes now use the same symmetry: a full blocking pipe or datagram
+socket arms the readiness generation and sleeps until a reader frees room, then
+the SDK wrapper hides the retry value. `O_NONBLOCK` still returns `ERROR` and a
+partially accepted write still returns its byte count. The Rust guest fills both
+queue types before forking a delayed reader that drains one item, so a
+timeout-only or short-return implementation cannot pass.
+
+`poll` waits on several descriptors at once. Each `PollFd` is a stable 16-byte
+record (`u64 fd`, `u16 events`, `u16 revents`); the kernel fills `revents` in
+place and returns the number of ready entries. Requestable events are `POLLIN`
+and `POLLOUT`; `POLLERR`, `POLLHUP` and `POLLNVAL` are reported regardless of the
+request. Pipes and sockets report buffered bytes and free capacity, signal
+descriptors report pending signals, and regular files and console output are
+always ready. A blocking call arms a readiness registration under the process
+table lock and wakes directly when a peer change advances the readiness
+generation; the PIT only enforces the deadline. The kernel returns the same
+private retry value used by `sigtimedwait` when it suspends the caller, and the
+guest `poll` wrapper recomputes the remaining timeout before retrying. The Rust
+guest waits on a pipe, a socket and a signal descriptor together, validates one
+payload from each, then checks write readiness, a finite timeout and `POLLNVAL`.
+A second guest case blocks `poll` with an infinite timeout until a child writes,
+so a timeout-only implementation cannot pass by waking on a nearby tick.
+
+`select` offers the same readiness model with classic fd bitmasks. Because the
+syscall ABI has three argument registers, the caller passes a pointer to a
+40-byte block holding `nfds` and the read, write, exception and timeout fields.
+Each set is sixteen `u64` words, so descriptors `0..1024` are selectable; a null
+pointer means no set. Read and write sets report `POLLIN` and `POLLOUT`, while the
+exception set reports `POLLERR`, `POLLHUP` and `POLLNVAL`. The kernel rewrites
+each set with the ready subset only on the final return, leaving the original
+request intact across retries. The Rust guest waits on the same pipe, socket and
+signal descriptor used by `poll`, then checks write readiness, a finite timeout
+and an exception report for a closed descriptor.
 
 `gtos_heap!` installs a small lock-free bump allocator that grows through `brk`.
 It reserves memory with one atomic compare-and-exchange, so a signal handler can
@@ -366,30 +467,38 @@ through `winbindshm`.
 
 `pipe(fds)` creates a bounded 4 KiB byte stream and writes a read/write
 descriptor pair into a user array. Both survive `fork` and `exec`, and closing
-the last write end reports EOF to readers. An empty pipe with a live writer
-returns `ERROR`, so the caller can `yield` and retry; that makes pipes usable
-by cooperatively scheduled servers without a blocking syscall. The Rust guest
-forks a child that writes a phrase in three chunks, then reads it in the parent
-and reports `streaming ipc ok`.
+the last write end reports EOF to readers. An empty blocking pipe parks the
+caller until a writer sends data or closes; `O_NONBLOCK` instead returns
+`ERROR`. `pipe2(fds, flags)` applies `O_NONBLOCK` and/or `O_CLOEXEC` to both
+ends before publishing the pair. The Rust guest forks a child that writes a
+phrase in three chunks, then reads it in the parent and reports
+`streaming ipc ok`; a separate check reports `pipe2 flags ok` after verifying
+both creation flags on each end.
 
-`socketpair(AF_UNIX, SOCK_SEQPACKET, fds)` creates two connected datagram
-endpoints and writes their descriptors into a two-`u64` user array. Each `write`
-sends one whole message and each `read` receives exactly one message, so
-boundaries survive transport. Writes are nonblocking: an empty socket returns
-`ERROR` until data arrives or the peer closes, and a full or oversized datagram
-write returns `ERROR`. Each direction buffers up to 4 KiB in 1 KiB datagrams.
-Closing the last copy of an end makes the peer observe EOF after queued data is
-drained. Socket descriptors inherit across `fork` and `exec` like other streams.
-The Rust guest verifies bidirectional delivery, boundaries, full-buffer behavior,
-inheritance and EOF, and reports `socketpair ok`.
-
+`socketpair(AF_UNIX, type, fds)` creates two connected endpoints and writes
+their descriptors into a two-`u64` user array. `SOCK_SEQPACKET` preserves
+message boundaries: each `write` sends one whole message and each `read`
+receives one message, with 4 KiB per direction in 1 KiB datagrams. `SOCK_STREAM`
+is a byte stream: writes may be coalesced and reads may return partial data.
+`SOCK_NONBLOCK` may be ORed into `type` to create both endpoints nonblocking,
+and `SOCK_CLOEXEC` marks both endpoints close-on-exec; the two flags combine.
+`fcntl(F_SETFL/F_GETFL, O_NONBLOCK)` can also change status flags later, while
+`fcntl(F_SETFD/F_GETFD, FD_CLOEXEC)` adjusts descriptor flags.
+`shutdown(fd, how)` supports read/write half-close on sockets and streams.
+Descriptors are inherited across `fork` and, by default, `exec`; the peer sees
+EOF only when the last copy of the sending end closes or is shut down for
+writing. The Rust guest verifies seqpacket and stream behavior, both type flags,
+inheritance/EOF, and reports `socketpair ok` and `sock cloexec ok`.
 `ioctl(fd, request, arg)` adds descriptor queries without moving payload bytes.
 `FIONREAD` reports readable bytes on pipes, scheme streams, SHM rings and file
 snapshots; `FIONWRITE` reports free bytes in the outgoing pipe or SHM ring. File
 descriptors also support `FILE_SIZE`, `FILE_TRUNCATE` and `FILE_SYNC`, which
 resize or flush the FAT16 backing through the same validated path used by
-`write`. The Rust guest checks pipe occupancy, truncates and resyncs a test file,
-and reports `ioctl ok`.
+`write`. Socket and scheme-connection descriptors answer
+`IOCTL_SOCKET_PEER_PID` with the process identifier on the other end; plain
+pipes have no peer process and reject that request. The Rust guest checks pipe
+occupancy, socket credentials across `fork`, truncates and resyncs a test file,
+and reports `ioctl ok` and `socket cred ok`.
 
 `schemeregister(name, length, notify_fd)` lets a process serve a URL scheme from
 ring 3. `notify_fd` is the write end of a pipe; the kernel keeps its own clone
@@ -424,8 +533,12 @@ guest checks `/` and `/sys/version` metadata, lists the root, changes into
 `vfs ok`.
 
 `run fork` demonstrates cooperative switching: the parent forks, yields while
-polling `waitpid`, and the child yields before exiting. `fork` shares the user
-pages copy-on-write; a ring-3 write fault gives the writer a private frame.
+polling `waitpid`, and the child yields before exiting. Ordinary guest callers
+can also use plain blocking `waitpid`: the kernel checks the child's state and
+arms the caller's readiness registration together, then parks until the child's
+exit wakes it and hides the retry value in the SDK wrapper. `try_waitpid` passes
+`WNOHANG` for the session manager's service polls. `fork` shares the user pages
+copy-on-write; a ring-3 write fault gives the writer a private frame.
 `run preempt` demonstrates PIT preemption: two processes print `P` and `C`
 without yielding, and the interleaved output shows the 100 Hz timer switching
 between them. `run sleep` demonstrates timer-driven blocking: the child sleeps

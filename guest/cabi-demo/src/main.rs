@@ -1,9 +1,10 @@
 //! A ring-3 guest written against the C ABI shim.
 //!
-//! It exercises the `main(argc, argv)` entry convention, raw syscall entry,
-//! descriptor wrappers, `errno`, the `brk` heap with recycling, classic string
-//! routines, `puts` and `atexit`. The source is still Rust, so the repository
-//! stays Rust-only.
+//! It exercises the kernel-seeded `main(argc, argv)` entry convention, raw
+//! syscall entry, descriptor wrappers including pipe creation, duplication,
+//! flag queries and socketpair shutdown, `errno`, the `brk` heap with recycling,
+//! classic string routines, `puts` and `atexit`. The source is still Rust, so
+//! the repository stays Rust-only.
 
 #![no_std]
 #![no_main]
@@ -16,6 +17,12 @@ gtos_cabi::gtos_cabi_main!(main);
 const OK: &[u8] = b"cabi ok\r\n";
 const FAIL: &[u8] = b"cabi failed\r\n";
 const CRT_OK: &[u8] = b"crt ok\r\n";
+const DESCRIPTORS_OK: &[u8] = b"cabi descriptors ok\r\n";
+const DESCRIPTORS_FAIL: &[u8] = b"cabi descriptors failed\r\n";
+const SOCKETPAIR_OK: &[u8] = b"cabi socketpair ok\r\n";
+const SOCKETPAIR_FAIL: &[u8] = b"cabi socketpair failed\r\n";
+const ARGV_OK: &[u8] = b"cabi argv ok\r\n";
+const ARGV_FAIL: &[u8] = b"cabi argv failed\r\n";
 const PATH: &[u8] = b"file:/CABI.TXT\0";
 const BAD_PATH: &[u8] = b"bogus:/missing\0";
 const DATA: &[u8] = b"CABI";
@@ -23,6 +30,7 @@ const HELLO: &[u8] = b"hello\0";
 const WORLD: &[u8] = b"world\0";
 const HELX: &[u8] = b"helX\0";
 const WORLD_TEXT: &[u8] = b"helloworld";
+const TARGET_FD: i32 = 20;
 const INTEGER: &[u8] = b"  -42xyz\0";
 
 /// Compares a C string with an expected byte slice including its final NUL.
@@ -111,12 +119,120 @@ extern "C" fn crt_atexit() {
     let _ = unsafe { gtos_cabi::write(gtos_cabi::STDOUT_FILENO, CRT_OK.as_ptr(), CRT_OK.len()) };
 }
 
-extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    let mut ok = argc == 1 && !argv.is_null();
-    if ok {
-        // SAFETY: the shim installed a one-element argv with a valid string.
-        ok = unsafe { cstr_matches(*argv, b"gtos\0") };
+/// Exercises the C ABI pipe, duplication and flag wrappers.
+fn descriptor_wrappers_ok() -> bool {
+    let mut fds = [-1i32; 2];
+    // SAFETY: `fds` is a writable two-element array owned by this frame.
+    if unsafe { gtos_cabi::pipe(fds.as_mut_ptr()) } != 0 {
+        return false;
     }
+    let mut ok = fds[0] >= 0 && fds[1] >= 0;
+    // SAFETY: `fds[1]` is a writable pipe end and the byte array is readable.
+    ok = ok && unsafe { gtos_cabi::write(fds[1], b"cd".as_ptr(), 2) } == 2;
+
+    let duplicated = gtos_cabi::dup(fds[0]);
+    ok = ok && duplicated >= 0;
+    let relocated = gtos_cabi::dup2(duplicated, TARGET_FD);
+    ok = ok && relocated == TARGET_FD;
+
+    let mut bytes = [0u8; 2];
+    // SAFETY: `relocated` is open and `bytes` is writable for two bytes.
+    ok = ok
+        && unsafe { gtos_cabi::read(relocated, bytes.as_mut_ptr(), bytes.len()) } == 2
+        && bytes == *b"cd";
+    ok = ok && gtos_cabi::close(relocated) == 0;
+    ok = ok && gtos_cabi::close(duplicated) == 0;
+    ok = ok && gtos_cabi::close(fds[1]) == 0;
+    ok = ok && gtos_cabi::close(fds[0]) == 0;
+    if !ok {
+        return false;
+    }
+
+    let mut flagged = [-1i32; 2];
+    let flags = gtos_cabi::O_NONBLOCK | gtos_cabi::O_CLOEXEC;
+    // SAFETY: `flagged` is a writable two-element array owned by this frame.
+    if unsafe { gtos_cabi::pipe2(flagged.as_mut_ptr(), flags) } != 0 {
+        return false;
+    }
+    let mut ok = flagged[0] >= 0 && flagged[1] >= 0;
+    ok = ok
+        && gtos_cabi::fcntl(flagged[0], gtos_cabi::F_GETFL, 0) == gtos_cabi::O_NONBLOCK
+        && gtos_cabi::fcntl(flagged[1], gtos_cabi::F_GETFL, 0) == gtos_cabi::O_NONBLOCK;
+    ok = ok
+        && gtos_cabi::fcntl(flagged[0], gtos_cabi::F_GETFD, 0) == gtos_cabi::FD_CLOEXEC
+        && gtos_cabi::fcntl(flagged[1], gtos_cabi::F_GETFD, 0) == gtos_cabi::FD_CLOEXEC;
+
+    let mut empty = 0u8;
+    // SAFETY: the read end is open and nonblocking, and `empty` is writable.
+    ok = ok
+        && unsafe { gtos_cabi::read(flagged[0], &raw mut empty, 1) } == -1
+        && unsafe { *gtos_cabi::__errno_location() } != 0;
+    ok = ok && gtos_cabi::close(flagged[1]) == 0;
+    ok = ok && gtos_cabi::close(flagged[0]) == 0;
+    ok
+}
+
+/// Exercises the C ABI socketpair and shutdown wrappers.
+fn socketpair_wrappers_ok() -> bool {
+    let mut fds = [-1i32; 2];
+    // SAFETY: `fds` is a writable two-element array owned by this frame.
+    if unsafe {
+        gtos_cabi::socketpair(
+            gtos_cabi::AF_UNIX,
+            gtos_cabi::SOCK_SEQPACKET,
+            0,
+            fds.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return false;
+    }
+    let mut ok = fds[0] >= 0 && fds[1] >= 0;
+    let payload = b"cabi";
+    // SAFETY: `fds[1]` is an open datagram endpoint and `payload` is readable.
+    ok = ok
+        && unsafe { gtos_cabi::write(fds[1], payload.as_ptr(), payload.len()) }
+            == isize::try_from(payload.len()).unwrap_or(-1);
+
+    let mut received = [0u8; 4];
+    // SAFETY: `fds[0]` is the peer endpoint and `received` is writable.
+    ok = ok
+        && unsafe { gtos_cabi::read(fds[0], received.as_mut_ptr(), received.len()) }
+            == isize::try_from(payload.len()).unwrap_or(-1)
+        && received == *payload;
+
+    ok = ok && gtos_cabi::shutdown(fds[1], gtos_cabi::SHUT_WR) == 0;
+    let mut eof = [0u8; 1];
+    // SAFETY: the writer is half-closed and `eof` is writable.
+    ok = ok && unsafe { gtos_cabi::read(fds[0], eof.as_mut_ptr(), eof.len()) } == 0;
+    ok = ok && gtos_cabi::close(fds[1]) == 0;
+    ok = ok && gtos_cabi::close(fds[0]) == 0;
+    ok
+}
+
+/// Checks the command line seeded by the kernel before `_start`.
+///
+/// # Safety
+///
+/// `argv` must point at the kernel-installed NULL-terminated pointer array.
+unsafe fn kernel_argv_ok(argc: i32, argv: *const *const u8) -> bool {
+    if argc != 3 || argv.is_null() {
+        return false;
+    }
+    // SAFETY: the caller guaranteed a readable pointer array with `argc` entries
+    // plus its terminator.
+    unsafe {
+        cstr_matches(*argv, b"CABI.ELF\0")
+            && cstr_matches(*argv.add(1), b"alpha\0")
+            && cstr_matches(*argv.add(2), b"beta\0")
+            && (*argv.add(3)).is_null()
+    }
+}
+
+extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
+    // SAFETY: `_start` receives the kernel-installed argument array verbatim.
+    let argv_ok = unsafe { kernel_argv_ok(argc, argv) };
+    let mut ok = argv_ok;
 
     let pid = gtos_cabi::getpid();
     ok = ok
@@ -152,11 +268,47 @@ extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     ok &= heap_ok();
     ok &= string_ok();
+    let descriptors_ok = descriptor_wrappers_ok();
+    ok &= descriptors_ok;
+    let socketpair_ok = socketpair_wrappers_ok();
+    ok &= socketpair_ok;
     ok &= gtos_cabi::atexit(crt_atexit) == 0;
 
     // `puts` writes the string plus a newline to standard output.
     ok &= unsafe { gtos_cabi::puts(HELLO.as_ptr()) } == 0;
 
+    let descriptor_message = if descriptors_ok {
+        DESCRIPTORS_OK
+    } else {
+        DESCRIPTORS_FAIL
+    };
+    let _ = unsafe {
+        gtos_cabi::write(
+            gtos_cabi::STDOUT_FILENO,
+            descriptor_message.as_ptr(),
+            descriptor_message.len(),
+        )
+    };
+    let socketpair_message = if socketpair_ok {
+        SOCKETPAIR_OK
+    } else {
+        SOCKETPAIR_FAIL
+    };
+    let _ = unsafe {
+        gtos_cabi::write(
+            gtos_cabi::STDOUT_FILENO,
+            socketpair_message.as_ptr(),
+            socketpair_message.len(),
+        )
+    };
+    let argv_message = if argv_ok { ARGV_OK } else { ARGV_FAIL };
+    let _ = unsafe {
+        gtos_cabi::write(
+            gtos_cabi::STDOUT_FILENO,
+            argv_message.as_ptr(),
+            argv_message.len(),
+        )
+    };
     let message = if ok { OK } else { FAIL };
     let _ = unsafe { gtos_cabi::write(gtos_cabi::STDOUT_FILENO, message.as_ptr(), message.len()) };
     i32::from(!ok)

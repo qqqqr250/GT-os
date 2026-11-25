@@ -1523,11 +1523,22 @@ fn format_disk() {
 /// The built-ins are `demo` (no argument), `scheme`, `fork`, `preempt`, `sleep`
 /// and `exec`. A flat binary must be linked against the kernel's user base (see
 /// [`usermode::USER_BASE`]); `HELLO.BIN` on the data disk is one such program.
-fn run_program(name: &str) {
+fn run_program(command: &str) {
     if !usermode::is_ready() {
         error(format_args!("ring 3 is not initialized"));
         return;
     }
+
+    let mut words = command.split_whitespace();
+    let name = words.next().unwrap_or("");
+    let mut startup = String::new();
+    startup.push_str(if name.is_empty() { "demo" } else { name });
+    startup.push('\0');
+    for word in words {
+        startup.push_str(word);
+        startup.push('\0');
+    }
+    startup.push('\0');
 
     let (label, program) = if name.is_empty() {
         ("demo program", usermode::demo_program())
@@ -1573,7 +1584,7 @@ fn run_program(name: &str) {
     }
 
     println!("running {label} ({} bytes) in ring 3 ...", program.len());
-    let code = usermode::run(&program);
+    let code = usermode::run(&program, startup.as_bytes());
     console::set_fg(console::GREEN);
     println!("{label} exited with status {code}");
     console::set_fg(console::FG);

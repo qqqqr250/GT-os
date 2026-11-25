@@ -23,10 +23,12 @@ Once the VM has booted, check the following by hand:
 - **Audio** – run `play BEEP.WAV`; the shell should print
   `playing BEEP.WAV (... bytes) ... done`. See [Audio](07-audio.md).
 - **User mode** – `run`, `run HELLO.BIN`, `run HELLO.ELF`, `run RUSTDEMO.ELF`,
-  `run CABI.ELF`, `run scheme`, `run fork`, `run preempt`, `run sleep`,
+  `run CABI.ELF alpha beta`, `run scheme`, `run fork`, `run preempt`, `run sleep`,
   `run exec` and `session` should each print their banner message and exit with
   status 0.
-  `run CABI.ELF` should additionally print `hello`, `cabi ok` and `crt ok` (the
+  `run CABI.ELF alpha beta` should additionally print `hello`,
+  `cabi descriptors ok`, `cabi socketpair ok`, `cabi argv ok`, `cabi ok` and
+  `crt ok` (the
   last from an `atexit` handler). `run preempt` should
   interleave `P` and `C` output; `run sleep` should print the parent's message
   before the child's. `run RUSTDEMO.ELF` should additionally print
@@ -37,7 +39,7 @@ Once the VM has booted, check the following by hand:
   `widget layout ok`, `widget view ok`, `widget nested ok`, `widget editor ok`,
   `shell panel ok`, `shell apps ok`, `shell focus ok`, `shell actions ok`,
   `shell launch ok`, `shared memory ok`,
-   `streaming ipc ok`, `socketpair ok`, `ioctl ok`, `stream file ok`, `fat writeback ok`,
+   `streaming ipc ok`, `pipe2 flags ok`, `dup ok`, `cloexec ok`, `socketpair ok`, `sock cloexec ok`, `socket cred ok`, `ioctl ok`, `stream file ok`, `fat writeback ok`,
   `directory stream ok`,
   `vfs ok`, `scheme server ok`,
   `scheme shm ok`,
@@ -50,9 +52,18 @@ Once the VM has booted, check the following by hand:
   entered`/`signal queue ok` for delivery after `sigreturn`,
   `child handler entered`/`signal cross process ok` for a parent signalling a
    forked child through a pipe, `signal default action ok`, `signal kill ok`,
-   `rt signal queue ok`, and `fault signal ok` for fatal dispositions, 64-bit
-   RT mask/pending delivery, and a handled ring-3 page fault observed by `waitpid`.
-   The input test waits up to
+   `rt signal queue ok`, `signal wait ok`, `signalfd read ok`,
+   `poll multiplex ok`, `select multiplex ok`, `readiness wake ok`,
+   `blocking read wake ok`, `blocking write wake ok`, `blocking waitpid wake ok`
+   and `fault signal ok` for fatal
+   dispositions, 64-bit RT mask/pending delivery, FIFO `siginfo` payloads
+   delivered in send order, blocking wait/timeout behavior, signal-descriptor
+   reads, multiplexed pipe/socket/signal readiness through both `poll` and
+   `select`, an infinite `poll` awakened by a child's pipe write, blocking reads
+   awakened by delayed pipe and socket writes, blocking writes awakened by a
+   delayed reader, a blocking `waitpid` awakened by a delayed child exit, and a
+   handled ring-3 page fault observed by `waitpid`. The input
+   test waits up to
   supply the events from the host, run this as soon as `waiting for input event`
   appears:
 

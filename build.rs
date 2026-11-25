@@ -10,6 +10,13 @@ mod fat16;
 mod iso;
 
 fn main() {
+    // The kernel is a separate Cargo workspace excluded from this package, so
+    // the default "watch the whole package" rule does not see edits to it. Tell
+    // Cargo explicitly, otherwise `cargo build` can silently reuse an old BIOS
+    // image made from a stale kernel artifact.
+    println!("cargo:rerun-if-changed=kernel/src");
+    println!("cargo:rerun-if-changed=kernel/Cargo.toml");
+
     // OUT_DIR is where Cargo wants build-script outputs.
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
 

@@ -135,7 +135,11 @@ scheme: a write updates the snapshot and flushes it through the FAT16 driver;
 `net` and `sys` descriptors stay read-only. `run scheme` is a hand-assembled user
 program that opens `sys:/version`, reads it, prints it and exits, so the whole
 path can be tested without a disk. `fork` copies the parent's table and `exec`
-preserves it.
+preserves it. Both `run` and `exec` seed a bounded C startup frame on the new
+user stack: NUL-terminated argument strings, a NULL-terminated `argv`, an empty
+`envp`, and `argc`/`argv` in the initial register context. The shell passes its
+own tokens; syscall 9 takes an optional length-prefixed packed block copied from
+the old address space before its page tables change.
 
 A ring-3 process can also register a scheme name with `schemeregister(name, fd)`
 and serve it through a pipe. When any process opens a URL using that scheme, the
@@ -162,12 +166,46 @@ per-process working directory in the PCB, inherited by `fork` and preserved by
 `exec`. The shell has matching `cd`, `pwd`, `stat`, `mounts` and `ls [path]`
 commands.
 
-Signals are the first step beyond the polling model: `signal`, `kill` and
-`sigreturn` are handled in `kernel/src/signal.rs` and `kernel/src/usermode.rs`.
-Delivery rewrites the saved `int 0x80` or timer frame so the next `iretq` enters
-a user-space handler with the interrupted register state copied to the user
-stack. This keeps the kernel free of handler code and needs no second scheduler
-path; the handler resumes its caller with `sigreturn`.
+Signals are the first step beyond the polling model: `signal`, `kill` (also used
+for queued sends), `sigprocmask`, `sigpending`, `sigtimedwait`, `signalfd` and
+`sigreturn` are handled in
+`kernel/src/signal.rs` and `kernel/src/usermode.rs`. Standard signals coalesce
+in a 64-bit pending mask, while real-time signals `34..=64` keep one entry per
+send in a bounded 64-entry FIFO so repeated sends arrive in order with their
+payload intact. `sigtimedwait` consumes that queue from a syscall, while a
+`signalfd` descriptor exposes the same records through `read` and shares the
+signal wake path when no record is ready. Delivery rewrites the saved `int 0x80` or timer frame so the
+next `iretq` enters a user-space handler with the interrupted register state
+and a `Siginfo` copied to the user stack. This keeps handler code in ring 3 and
+needs no second scheduler path; the handler resumes its caller with `sigreturn`.
+
+Blocking `read` reuses the same readiness registration: an empty blocking pipe
+or socket read arms the generation in the process-table critical section and
+sleeps until a peer writes or closes, while `O_NONBLOCK` returns `ERROR` and EOF
+returns `0`. A successful consume advances the generation because it frees queue
+capacity for other waiters. A full blocking write uses the mirrored path: it
+arms the generation when the queue cannot accept another byte and sleeps until
+a reader consumes data, while nonblocking and partial writes are unchanged.
+
+`waitpid` uses the same registration for process lifecycle events: it checks the
+target's exit state and arms the caller under one process-table lock, then parks
+until `mark_exited` advances the generation and wakes it. The status pointer is
+written and the child reaped only after the final state is observed. `WNOHANG`
+takes the same state check without arming or sleeping and returns zero for a live
+child, so service managers can pump other work between probes.
+
+`poll` generalises readiness queries across descriptors. `FdTable::poll` asks each
+resource what it can do: stream and socket handles inspect their bounded queues,
+signal descriptors inspect the owning process's pending mask, and file-like
+resources are always ready. A blocking wait records the readiness generation in
+the process table in the same critical section that checks the descriptors; a
+write, read, close, shutdown, signal or descriptor setup change advances that
+generation and wakes the waiter directly, while the PIT remains only the deadline
+fallback. The guest SDK hides the retry value while preserving the caller's
+timeout. `select`
+maps the same readiness answers onto 1024-bit fd sets: read, write and exception
+bitmasks are copied in through one small argument block and copied back only when
+the wait finally succeeds or times out.
 
 The framebuffer device keeps the same discipline: `fbinfo` returns geometry as
 plain integers, and `fbcommit` validates a user-owned shadow buffer before
@@ -195,7 +233,8 @@ destruction and process exit until the window is released. `pipe()` adds a
 bounded byte stream to the descriptor table. Its endpoints are reference-counted
 handles cloned by `fork`, so a parent and child can stream messages through the
 same `read`/`write` syscalls used for scheme resources; EOF appears when the last
-write end closes.
+write end closes. `pipe2()` applies `O_NONBLOCK` and `O_CLOEXEC` to both endpoints
+before publishing the descriptor pair, matching `socketpair`'s creation flags.
 
 The shell also borrows from Redox's Ion shell: **Up**/**Down** recall command
 history (32 entries, with duplicate suppression), **Tab** completes command

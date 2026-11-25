@@ -125,12 +125,18 @@ struct Pipe {
     bytes: VecDeque<u8>,
     readers: usize,
     writers: usize,
+    read_shutdown: bool,
+    write_shutdown: bool,
+    nonblocking: bool,
 }
 
 impl Pipe {
     fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
-        if self.readers == 0 {
+        if self.write_shutdown || self.readers == 0 {
             return Err(String::from("broken pipe"));
+        }
+        if bytes.is_empty() {
+            return Ok(0);
         }
         let mut written = 0;
         while written < bytes.len() {
@@ -143,15 +149,21 @@ impl Pipe {
                 .extend(bytes[written..written + count].iter().copied());
             written += count;
         }
+        if written == 0 {
+            return Err(String::from(READ_WOULD_BLOCK));
+        }
         Ok(written)
     }
 
     fn read(&mut self, output: &mut [u8]) -> Result<usize, String> {
+        if self.read_shutdown {
+            return Ok(0);
+        }
         if self.bytes.is_empty() {
-            return if self.writers == 0 {
+            return if self.writers == 0 || self.write_shutdown {
                 Ok(0)
             } else {
-                Err(String::from("no pipe data available"))
+                Err(String::from(READ_WOULD_BLOCK))
             };
         }
         let count = output.len().min(self.bytes.len());
@@ -181,6 +193,9 @@ struct DatagramQueue {
     bytes: usize,
     readers: usize,
     writers: usize,
+    read_shutdown: bool,
+    write_shutdown: bool,
+    nonblocking: bool,
 }
 
 impl DatagramQueue {
@@ -190,6 +205,9 @@ impl DatagramQueue {
             bytes: 0,
             readers: 1,
             writers: 1,
+            read_shutdown: false,
+            write_shutdown: false,
+            nonblocking: false,
         }
     }
 
@@ -207,14 +225,14 @@ impl DatagramQueue {
         if bytes.is_empty() {
             return Ok(0);
         }
-        if self.readers == 0 {
+        if self.write_shutdown || self.readers == 0 {
             return Err(String::from("socket peer is closed"));
         }
         if bytes.len() > MAX_DATAGRAM_BYTES {
             return Err(String::from("datagram is too large"));
         }
         if bytes.len() > self.writable() {
-            return Err(String::from("socket buffer is full"));
+            return Err(String::from(READ_WOULD_BLOCK));
         }
         self.bytes += bytes.len();
         self.messages.push_back(bytes.to_vec());
@@ -222,11 +240,14 @@ impl DatagramQueue {
     }
 
     fn receive(&mut self, output: &mut [u8]) -> Result<usize, String> {
+        if self.read_shutdown {
+            return Ok(0);
+        }
         if self.messages.is_empty() {
-            return if self.writers == 0 {
+            return if self.writers == 0 || self.write_shutdown {
                 Ok(0)
             } else {
-                Err(String::from("no socket data available"))
+                Err(String::from(READ_WOULD_BLOCK))
             };
         }
         let message = self
@@ -249,22 +270,29 @@ impl DatagramQueue {
 pub(crate) struct DatagramHandle {
     inbound: Arc<Mutex<DatagramQueue>>,
     outbound: Arc<Mutex<DatagramQueue>>,
+    peer_pid: u64,
 }
 
 impl DatagramHandle {
-    fn pair() -> (Self, Self) {
+    fn pair(peer_pid: u64) -> (Self, Self) {
         let left_to_right = Arc::new(Mutex::new(DatagramQueue::new()));
         let right_to_left = Arc::new(Mutex::new(DatagramQueue::new()));
         (
             Self {
                 inbound: Arc::clone(&right_to_left),
                 outbound: Arc::clone(&left_to_right),
+                peer_pid,
             },
             Self {
                 inbound: left_to_right,
                 outbound: right_to_left,
+                peer_pid,
             },
         )
+    }
+
+    fn peer_pid(&self) -> u64 {
+        self.peer_pid
     }
 
     fn send(&self, bytes: &[u8]) -> Result<usize, String> {
@@ -282,6 +310,23 @@ impl DatagramHandle {
     fn writable(&self) -> usize {
         self.outbound.lock().writable()
     }
+
+    fn shutdown(&self, how: u64) -> Result<(), String> {
+        match how {
+            SHUT_RD => {
+                self.inbound.lock().read_shutdown = true;
+            }
+            SHUT_WR => {
+                self.outbound.lock().write_shutdown = true;
+            }
+            SHUT_RDWR => {
+                self.inbound.lock().read_shutdown = true;
+                self.outbound.lock().write_shutdown = true;
+            }
+            _ => return Err(String::from("invalid shutdown how")),
+        }
+        Ok(())
+    }
 }
 
 impl Clone for DatagramHandle {
@@ -291,6 +336,7 @@ impl Clone for DatagramHandle {
         Self {
             inbound: Arc::clone(&self.inbound),
             outbound: Arc::clone(&self.outbound),
+            peer_pid: self.peer_pid,
         }
     }
 }
@@ -318,6 +364,49 @@ pub(crate) struct StreamHandle {
     /// Optional shared-memory ring, shared by both ends of a connection.
     shm: Arc<Mutex<Option<ShmStream>>>,
     role: StreamRole,
+    /// Process on the other end of a socketpair or scheme connection.
+    peer_pid: Option<u64>,
+}
+
+impl StreamHandle {
+    fn peer_pid(&self) -> Option<u64> {
+        self.peer_pid
+    }
+
+    fn shutdown(&self, how: u64) -> Result<(), String> {
+        match how {
+            SHUT_RD => {
+                self.pipe.lock().read_shutdown = true;
+            }
+            SHUT_WR => match self.role {
+                StreamRole::Write => self.pipe.lock().write_shutdown = true,
+                StreamRole::Duplex => {
+                    self.peer
+                        .as_ref()
+                        .expect("duplex stream has an outbound side")
+                        .lock()
+                        .write_shutdown = true;
+                }
+                StreamRole::Read => return Err(String::from("descriptor is read-only")),
+            },
+            SHUT_RDWR => {
+                self.pipe.lock().read_shutdown = true;
+                match self.role {
+                    StreamRole::Write => self.pipe.lock().write_shutdown = true,
+                    StreamRole::Duplex => {
+                        self.peer
+                            .as_ref()
+                            .expect("duplex stream has an outbound side")
+                            .lock()
+                            .write_shutdown = true;
+                    }
+                    StreamRole::Read => {}
+                }
+            }
+            _ => return Err(String::from("invalid shutdown how")),
+        }
+        Ok(())
+    }
 }
 
 impl Clone for StreamHandle {
@@ -339,6 +428,7 @@ impl Clone for StreamHandle {
             peer: self.peer.as_ref().map(Arc::clone),
             shm: Arc::clone(&self.shm),
             role: self.role,
+            peer_pid: self.peer_pid,
         }
     }
 }
@@ -385,6 +475,17 @@ struct DirStream {
     index: usize,
 }
 
+/// A descriptor that turns pending signals into readable `Siginfo` records.
+///
+/// Signals belong to the process, not the descriptor, so this only stores the
+/// set to wait for and the descriptor flags. A child that inherits the fd reads
+/// its own pending signals after `fork`.
+#[derive(Clone, Debug)]
+struct SignalFdHandle {
+    mask: u64,
+    nonblocking: bool,
+}
+
 /// An opened resource: its bytes, a MIME type, and a read/write cursor.
 #[derive(Clone, Debug)]
 pub struct Resource {
@@ -406,6 +507,8 @@ pub struct Resource {
     file: Option<FileStream>,
     /// Incremental state, when this descriptor streams directory names.
     dir: Option<DirStream>,
+    /// Signal wait set, when this descriptor exposes pending signals.
+    signalfd: Option<SignalFdHandle>,
     cursor: usize,
 }
 
@@ -424,6 +527,49 @@ pub const IOCTL_FILE_SIZE: u64 = 3;
 pub const IOCTL_FILE_TRUNCATE: u64 = 4;
 /// `ioctl`: flush a writable file descriptor to disk.
 pub const IOCTL_FILE_SYNC: u64 = 5;
+/// `ioctl`: peer process identifier of a socket/stream connection.
+pub const IOCTL_SOCKET_PEER_PID: u64 = 6;
+
+/// `shutdown`: disable further receives.
+pub const SHUT_RD: u64 = 0;
+/// `shutdown`: disable further sends.
+pub const SHUT_WR: u64 = 1;
+/// `shutdown`: disable further sends and receives.
+pub const SHUT_RDWR: u64 = 2;
+
+/// `fcntl`: get file descriptor flags.
+pub const F_GETFD: u64 = 1;
+/// `fcntl`: set file descriptor flags.
+pub const F_SETFD: u64 = 2;
+/// `fcntl`: get file status flags.
+pub const F_GETFL: u64 = 3;
+/// `fcntl`: set file status flags.
+pub const F_SETFL: u64 = 4;
+/// Close-on-exec file descriptor flag.
+pub const FD_CLOEXEC: u64 = 1;
+/// Nonblocking file status flag.
+pub const O_NONBLOCK: u64 = 1;
+/// Close-on-exec flag accepted at descriptor creation time.
+pub const O_CLOEXEC: u64 = 0x8_0000;
+
+/// `poll`: the descriptor is readable.
+pub const POLLIN: u16 = 0x0001;
+/// `poll`: the descriptor is writable.
+pub const POLLOUT: u16 = 0x0004;
+/// `poll`: the descriptor is in an error state.
+pub const POLLERR: u16 = 0x0008;
+/// `poll`: the peer closed the connection.
+pub const POLLHUP: u16 = 0x0010;
+/// `poll`: the descriptor number is not open.
+pub const POLLNVAL: u16 = 0x0020;
+/// Internal marker for a read that must wait for more data.
+pub const READ_WOULD_BLOCK: &str = "would block";
+
+/// Reports whether a descriptor error means data may arrive later.
+#[must_use]
+pub fn is_would_block(error: &str) -> bool {
+    error == READ_WOULD_BLOCK
+}
 
 /// Largest file the `truncate` ioctl will create.
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -435,7 +581,7 @@ impl Resource {
     /// Decodes the resource as text, replacing invalid UTF-8 with U+FFFD.
     #[must_use]
     pub fn text(&self) -> String {
-        if self.dir.is_some() || self.datagram.is_some() {
+        if self.dir.is_some() || self.datagram.is_some() || self.signalfd.is_some() {
             return String::new();
         }
         if let Some(file) = self.file.as_ref() {
@@ -453,7 +599,7 @@ impl Resource {
         if self.dir.is_some() {
             return 0;
         }
-        if self.datagram.is_some() {
+        if self.datagram.is_some() || self.signalfd.is_some() {
             return 0;
         }
         match (&self.file, &self.stream) {
@@ -461,6 +607,30 @@ impl Resource {
             (_, Some(_)) => 0,
             _ => self.data.len() as u64,
         }
+    }
+
+    /// Answers a readiness query for `poll`.
+    ///
+    /// `signal_ready` is computed by the caller from the owning process's
+    /// pending set, because signals belong to the process rather than to the
+    /// descriptor.
+    #[must_use]
+    pub(crate) fn poll(&self, events: u16, signal_ready: bool) -> u16 {
+        if let Some(socket) = self.datagram.as_ref() {
+            return datagram_poll(socket, events);
+        }
+        if let Some(stream) = self.stream.as_ref() {
+            return stream_poll(stream, events);
+        }
+        if self.signalfd.is_some() {
+            return if signal_ready { events & POLLIN } else { 0 };
+        }
+        // Snapshots, streamed files and directories never block in `read`.
+        let mut revents = events & POLLIN;
+        if self.writable {
+            revents |= events & POLLOUT;
+        }
+        revents
     }
 }
 
@@ -578,7 +748,7 @@ pub(crate) fn connect(url: &str, caller: u64) -> Option<StreamHandle> {
     };
 
     let owner_pid = crate::process::Pid::from_u64(owner)?;
-    let (client, server) = FdTable::duplex_pair();
+    let (client, server) = FdTable::duplex_pair(owner, caller);
     let server_fd = crate::process::with_process_mut(owner_pid, |process| {
         process.fds_mut().insert_stream(server).ok()
     })
@@ -603,6 +773,7 @@ const MAX_FDS: usize = 16;
 struct Entry {
     fd: u64,
     resource: Resource,
+    cloexec: bool,
 }
 
 /// One process's descriptor table.
@@ -641,8 +812,80 @@ fn stream_ioctl(stream: &StreamHandle, request: u64) -> Result<u64, String> {
             let outgoing = stream.peer.as_ref().unwrap_or(&stream.pipe);
             Ok((PIPE_CAPACITY - outgoing.lock().bytes.len()) as u64)
         }
+        IOCTL_SOCKET_PEER_PID => stream
+            .peer_pid()
+            .ok_or_else(|| String::from("descriptor has no peer process")),
         _ => Err(String::from("unsupported stream ioctl")),
     }
+}
+
+/// Computes `poll` readiness for one stream endpoint.
+fn stream_poll(stream: &StreamHandle, events: u16) -> u16 {
+    let mut revents = 0;
+    let shared = stream.shm.lock();
+    match stream.role {
+        StreamRole::Write => {
+            let pipe = stream.pipe.lock();
+            if events & POLLOUT != 0
+                && (shared.as_ref().is_some_and(|buffer| buffer.writable() != 0)
+                    || pipe.bytes.len() < PIPE_CAPACITY)
+            {
+                revents |= POLLOUT;
+            }
+            if pipe.readers == 0 || pipe.write_shutdown {
+                revents |= POLLERR;
+            }
+        }
+        StreamRole::Read => {
+            let pipe = stream.pipe.lock();
+            if events & POLLIN != 0
+                && (shared.as_ref().is_some_and(|buffer| buffer.readable() != 0)
+                    || !pipe.bytes.is_empty())
+            {
+                revents |= POLLIN;
+            }
+            if pipe.writers == 0 || pipe.write_shutdown {
+                revents |= POLLHUP;
+            }
+        }
+        StreamRole::Duplex => {
+            let inbound = stream.pipe.lock();
+            if events & POLLIN != 0
+                && (shared.as_ref().is_some_and(|buffer| buffer.readable() != 0)
+                    || !inbound.bytes.is_empty())
+            {
+                revents |= POLLIN;
+            }
+            if inbound.writers == 0 || inbound.write_shutdown {
+                revents |= POLLHUP;
+            }
+            if events & POLLOUT != 0 {
+                let outgoing = stream.peer.as_ref().unwrap_or(&stream.pipe);
+                let outgoing = outgoing.lock();
+                if shared.as_ref().is_some_and(|buffer| buffer.writable() != 0)
+                    || outgoing.bytes.len() < PIPE_CAPACITY
+                {
+                    revents |= POLLOUT;
+                }
+            }
+        }
+    }
+    revents
+}
+
+/// Computes `poll` readiness for one datagram socket endpoint.
+fn datagram_poll(socket: &DatagramHandle, events: u16) -> u16 {
+    let mut revents = 0;
+    if events & POLLIN != 0 && socket.readable() != 0 {
+        revents |= POLLIN;
+    }
+    if events & POLLOUT != 0 && socket.writable() != 0 {
+        revents |= POLLOUT;
+    }
+    if socket.inbound.lock().writers == 0 {
+        revents |= POLLHUP;
+    }
+    revents
 }
 
 impl FdTable {
@@ -677,7 +920,11 @@ impl FdTable {
             fd = fd.wrapping_add(1);
         }
         self.next_fd = fd.wrapping_add(1);
-        self.entries[slot] = Some(Entry { fd, resource });
+        self.entries[slot] = Some(Entry {
+            fd,
+            resource,
+            cloexec: false,
+        });
         fd
     }
 
@@ -696,6 +943,9 @@ impl FdTable {
             bytes: VecDeque::new(),
             readers: 1,
             writers: 1,
+            read_shutdown: false,
+            write_shutdown: false,
+            nonblocking: false,
         }));
         let read_end = Resource {
             url: String::from("pipe:/read"),
@@ -709,9 +959,11 @@ impl FdTable {
                 peer: None,
                 shm: Arc::new(Mutex::new(None)),
                 role: StreamRole::Read,
+                peer_pid: None,
             }),
             file: None,
             dir: None,
+            signalfd: None,
             cursor: 0,
         };
         let write_end = Resource {
@@ -726,9 +978,11 @@ impl FdTable {
                 peer: None,
                 shm: Arc::new(Mutex::new(None)),
                 role: StreamRole::Write,
+                peer_pid: None,
             }),
             file: None,
             dir: None,
+            signalfd: None,
             cursor: 0,
         };
         Ok((self.insert(read_end), self.insert(write_end)))
@@ -738,11 +992,16 @@ impl FdTable {
     ///
     /// Each end may send and receive whole datagrams. Writes are atomic: a
     /// reader observes one complete message instead of an arbitrary byte slice.
-    pub fn socketpair(&mut self) -> Result<(u64, u64), String> {
+    pub fn socketpair(&mut self, owner_pid: u64) -> Result<(u64, u64), String> {
+        self.socketpair_seqpacket(owner_pid)
+    }
+
+    /// Creates two connected `SOCK_SEQPACKET` endpoints.
+    pub fn socketpair_seqpacket(&mut self, owner_pid: u64) -> Result<(u64, u64), String> {
         if !self.has_room(2) {
             return Err(String::from("descriptor table is full"));
         }
-        let (left, right) = DatagramHandle::pair();
+        let (left, right) = DatagramHandle::pair(owner_pid);
         let first = Resource {
             url: String::from("socket:/pair-0"),
             mime: String::from("application/octet-stream"),
@@ -753,6 +1012,7 @@ impl FdTable {
             stream: None,
             file: None,
             dir: None,
+            signalfd: None,
             cursor: 0,
         };
         let second = Resource {
@@ -765,6 +1025,45 @@ impl FdTable {
             stream: None,
             file: None,
             dir: None,
+            signalfd: None,
+            cursor: 0,
+        };
+        Ok((self.insert(first), self.insert(second)))
+    }
+
+    /// Creates two connected `SOCK_STREAM` endpoints.
+    ///
+    /// Unlike seqpacket sockets, stream sockets are a byte stream: writes may be
+    /// coalesced and reads may return partial data.
+    pub fn socketpair_stream(&mut self, owner_pid: u64) -> Result<(u64, u64), String> {
+        if !self.has_room(2) {
+            return Err(String::from("descriptor table is full"));
+        }
+        let (left, right) = Self::duplex_pair(owner_pid, owner_pid);
+        let first = Resource {
+            url: String::from("socket:/stream-0"),
+            mime: String::from("application/octet-stream"),
+            data: Vec::new(),
+            writable: true,
+            disk_path: None,
+            datagram: None,
+            stream: Some(left),
+            file: None,
+            dir: None,
+            signalfd: None,
+            cursor: 0,
+        };
+        let second = Resource {
+            url: String::from("socket:/stream-1"),
+            mime: String::from("application/octet-stream"),
+            data: Vec::new(),
+            writable: true,
+            disk_path: None,
+            datagram: None,
+            stream: Some(right),
+            file: None,
+            dir: None,
+            signalfd: None,
             cursor: 0,
         };
         Ok((self.insert(first), self.insert(second)))
@@ -775,16 +1074,25 @@ impl FdTable {
     /// The first endpoint reads client bytes and writes to the server; the
     /// second reads server bytes and writes to the client.
     #[must_use]
-    pub(crate) fn duplex_pair() -> (StreamHandle, StreamHandle) {
+    pub(crate) fn duplex_pair(
+        client_peer_pid: u64,
+        server_peer_pid: u64,
+    ) -> (StreamHandle, StreamHandle) {
         let client_to_server = Arc::new(Mutex::new(Pipe {
             bytes: VecDeque::new(),
             readers: 1,
             writers: 1,
+            read_shutdown: false,
+            write_shutdown: false,
+            nonblocking: false,
         }));
         let server_to_client = Arc::new(Mutex::new(Pipe {
             bytes: VecDeque::new(),
             readers: 1,
             writers: 1,
+            read_shutdown: false,
+            write_shutdown: false,
+            nonblocking: false,
         }));
         let shm = Arc::new(Mutex::new(None));
         let client = StreamHandle {
@@ -792,12 +1100,14 @@ impl FdTable {
             peer: Some(Arc::clone(&client_to_server)),
             shm: Arc::clone(&shm),
             role: StreamRole::Duplex,
+            peer_pid: Some(client_peer_pid),
         };
         let server = StreamHandle {
             pipe: client_to_server,
             peer: Some(server_to_client),
             shm,
             role: StreamRole::Duplex,
+            peer_pid: Some(server_peer_pid),
         };
         (client, server)
     }
@@ -817,8 +1127,78 @@ impl FdTable {
             stream: Some(handle),
             file: None,
             dir: None,
+            signalfd: None,
             cursor: 0,
         }))
+    }
+
+    /// Installs a signal descriptor for `mask`.
+    ///
+    /// The mask is validated by the caller; this method only owns descriptor
+    /// bookkeeping. `nonblocking` makes empty reads fail instead of blocking,
+    /// and `cloexec` marks the descriptor to be closed by `exec`.
+    pub fn insert_signalfd(
+        &mut self,
+        mask: u64,
+        nonblocking: bool,
+        cloexec: bool,
+    ) -> Result<u64, String> {
+        if !self.has_room(1) {
+            return Err(String::from("descriptor table is full"));
+        }
+        let fd = self.insert(Resource {
+            url: String::from("signalfd:/pending"),
+            mime: String::from("application/octet-stream"),
+            data: Vec::new(),
+            writable: false,
+            disk_path: None,
+            datagram: None,
+            stream: None,
+            file: None,
+            dir: None,
+            signalfd: Some(SignalFdHandle { mask, nonblocking }),
+            cursor: 0,
+        });
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .filter_map(Option::as_mut)
+            .find(|entry| entry.fd == fd)
+        {
+            entry.cloexec = cloexec;
+        }
+        Ok(fd)
+    }
+
+    /// Returns `(mask, nonblocking)` for a signal descriptor.
+    #[must_use]
+    pub(crate) fn signalfd(&self, fd: u64) -> Option<(u64, bool)> {
+        let handle = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == fd)?
+            .resource
+            .signalfd
+            .as_ref()?;
+        Some((handle.mask, handle.nonblocking))
+    }
+
+    /// Answers a readiness query for one descriptor.
+    ///
+    /// Unknown descriptors report [`POLLNVAL`] instead of failing the whole
+    /// call, matching ordinary `poll` behaviour.
+    #[must_use]
+    pub fn poll(&self, fd: u64, events: u16, signal_ready: bool) -> u16 {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == fd)
+        else {
+            return POLLNVAL;
+        };
+        entry.resource.poll(events, signal_ready)
     }
 
     /// Attaches a retained shared-memory region to a duplex descriptor.
@@ -870,6 +1250,11 @@ impl FdTable {
             .find(|entry| entry.fd == fd)
             .ok_or_else(|| String::from("bad file descriptor"))?;
         let resource = &mut entry.resource;
+        if resource.signalfd.is_some() {
+            return Err(String::from(
+                "signal descriptor requires the wait read path",
+            ));
+        }
         if let Some(socket) = resource.datagram.as_ref() {
             return socket.receive(out);
         }
@@ -889,7 +1274,7 @@ impl FdTable {
                 return if eof {
                     Ok(0)
                 } else {
-                    Err(String::from("no pipe data available"))
+                    Err(String::from(READ_WOULD_BLOCK))
                 };
             }
             return stream.pipe.lock().read(out);
@@ -946,6 +1331,9 @@ impl FdTable {
         if entry.resource.stream.is_some() {
             return Err(String::from("pipes are not seekable"));
         }
+        if entry.resource.signalfd.is_some() {
+            return Err(String::from("signal descriptors are not seekable"));
+        }
         if entry.resource.dir.is_some() {
             if whence != SEEK_SET || offset != 0 {
                 return Err(String::from("directories only support rewind"));
@@ -988,6 +1376,7 @@ impl FdTable {
             return match request {
                 IOCTL_FIONREAD => Ok(socket.readable() as u64),
                 IOCTL_FIONWRITE => Ok(socket.writable() as u64),
+                IOCTL_SOCKET_PEER_PID => Ok(socket.peer_pid()),
                 _ => Err(String::from("unsupported socket ioctl")),
             };
         }
@@ -1133,6 +1522,61 @@ impl FdTable {
         Ok(bytes.len())
     }
 
+    /// Duplicates a descriptor. The new descriptor shares underlying
+    /// pipe/socket/SHM handles but has an independent cursor and copied
+    /// resource state.
+    pub fn dup(&mut self, fd: u64) -> Result<u64, String> {
+        let resource = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == fd)
+            .map(|entry| entry.resource.clone())
+            .ok_or_else(|| String::from("bad file descriptor"))?;
+        if !self.has_room(1) {
+            return Err(String::from("descriptor table is full"));
+        }
+        Ok(self.insert(resource))
+    }
+
+    /// Duplicates `oldfd` to `newfd`, closing `newfd` first if it is open.
+    pub fn dup2(&mut self, oldfd: u64, newfd: u64) -> Result<u64, String> {
+        if oldfd < FIRST_FD || newfd < FIRST_FD {
+            return Err(String::from("bad file descriptor"));
+        }
+        let resource = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == oldfd)
+            .map(|entry| entry.resource.clone())
+            .ok_or_else(|| String::from("bad file descriptor"))?;
+        if oldfd == newfd {
+            return Ok(newfd);
+        }
+        if self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .all(|entry| entry.fd != newfd)
+            && !self.has_room(1)
+        {
+            return Err(String::from("descriptor table is full"));
+        }
+        self.close(newfd);
+        let slot = self
+            .entries
+            .iter()
+            .position(Option::is_none)
+            .ok_or_else(|| String::from("descriptor table is full"))?;
+        self.entries[slot] = Some(Entry {
+            fd: newfd,
+            resource,
+            cloexec: false,
+        });
+        Ok(newfd)
+    }
+
     /// Closes a descriptor, returning whether it was open.
     ///
     /// Closing a FAT-backed descriptor writes back any dirty cached clusters so
@@ -1168,6 +1612,134 @@ impl FdTable {
             let _ = crate::fat::sync();
         }
         // `next_fd` is deliberately not reset: descriptors are never reused.
+    }
+
+    /// Shuts down read and/or write sides of a socket/stream descriptor.
+    pub fn shutdown(&self, fd: u64, how: u64) -> Result<(), String> {
+        let entry = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == fd)
+            .ok_or_else(|| String::from("bad file descriptor"))?;
+        if let Some(socket) = entry.resource.datagram.as_ref() {
+            return socket.shutdown(how);
+        }
+        if let Some(stream) = entry.resource.stream.as_ref() {
+            return stream.shutdown(how);
+        }
+        Err(String::from("descriptor does not support shutdown"))
+    }
+
+    /// Reports whether a descriptor is nonblocking.
+    ///
+    /// Files and other always-ready resources return `false`; the caller only
+    /// consults this after a descriptor read reported `READ_WOULD_BLOCK`.
+    #[must_use]
+    pub fn is_nonblocking(&self, fd: u64) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .filter_map(Option::as_ref)
+            .find(|entry| entry.fd == fd)
+        else {
+            return false;
+        };
+        if let Some(socket) = entry.resource.datagram.as_ref() {
+            return socket.inbound.lock().nonblocking;
+        }
+        if let Some(stream) = entry.resource.stream.as_ref() {
+            return stream.pipe.lock().nonblocking;
+        }
+        entry
+            .resource
+            .signalfd
+            .as_ref()
+            .is_some_and(|signalfd| signalfd.nonblocking)
+    }
+
+    /// Gets or sets file descriptor/status flags for a descriptor.
+    pub fn fcntl(&mut self, fd: u64, cmd: u64, arg: u64) -> Result<u64, String> {
+        let slot = self
+            .entries
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.fd == fd))
+            .ok_or_else(|| String::from("bad file descriptor"))?;
+        let entry = self.entries[slot]
+            .as_ref()
+            .ok_or_else(|| String::from("bad file descriptor"))?;
+        match cmd {
+            F_GETFD => Ok(u64::from(entry.cloexec)),
+            F_SETFD => {
+                if arg & !FD_CLOEXEC != 0 {
+                    return Err(String::from("unsupported file descriptor flags"));
+                }
+                if let Some(entry) = self.entries[slot].as_mut() {
+                    entry.cloexec = arg & FD_CLOEXEC != 0;
+                }
+                Ok(0)
+            }
+            F_GETFL => {
+                if let Some(socket) = entry.resource.datagram.as_ref() {
+                    let nb = socket.inbound.lock().nonblocking;
+                    return Ok(if nb { O_NONBLOCK } else { 0 });
+                }
+                if let Some(stream) = entry.resource.stream.as_ref() {
+                    let nb = stream.pipe.lock().nonblocking;
+                    return Ok(if nb { O_NONBLOCK } else { 0 });
+                }
+                if let Some(signalfd) = entry.resource.signalfd.as_ref() {
+                    return Ok(if signalfd.nonblocking { O_NONBLOCK } else { 0 });
+                }
+                Ok(0)
+            }
+            F_SETFL => {
+                if arg & !O_NONBLOCK != 0 {
+                    return Err(String::from("unsupported file status flags"));
+                }
+                let nb = arg & O_NONBLOCK != 0;
+                if let Some(socket) = entry.resource.datagram.as_ref() {
+                    socket.inbound.lock().nonblocking = nb;
+                    socket.outbound.lock().nonblocking = nb;
+                    return Ok(0);
+                }
+                if let Some(stream) = entry.resource.stream.as_ref() {
+                    stream.pipe.lock().nonblocking = nb;
+                    if let Some(peer) = stream.peer.as_ref() {
+                        peer.lock().nonblocking = nb;
+                    }
+                    return Ok(0);
+                }
+                if entry.resource.signalfd.is_some() {
+                    if let Some(entry) = self.entries[slot].as_mut() {
+                        if let Some(signalfd) = entry.resource.signalfd.as_mut() {
+                            signalfd.nonblocking = nb;
+                        }
+                    }
+                    return Ok(0);
+                }
+                Ok(0)
+            }
+            _ => Err(String::from("unsupported fcntl command")),
+        }
+    }
+
+    /// Closes descriptors marked close-on-exec, as required by `exec`.
+    pub fn close_cloexec(&mut self) {
+        let mut fat_backed = false;
+        for slot in &mut self.entries {
+            let close = slot.as_ref().is_some_and(|entry| entry.cloexec);
+            if close {
+                if let Some(entry) = slot.as_ref() {
+                    fat_backed |=
+                        entry.resource.file.is_some() || entry.resource.disk_path.is_some();
+                }
+                *slot = None;
+            }
+        }
+        if fat_backed {
+            let _ = crate::fat::sync();
+        }
     }
 }
 
@@ -1223,6 +1795,7 @@ fn open_root_directory() -> Result<Resource, String> {
         stream: None,
         file: None,
         dir: Some(DirStream { index: 0 }),
+        signalfd: None,
         cursor: 0,
     })
 }
@@ -1268,6 +1841,7 @@ fn open_file(path: &str) -> Result<Resource, String> {
             size,
         }),
         dir: None,
+        signalfd: None,
         cursor: 0,
     })
 }
@@ -1294,6 +1868,7 @@ fn open_net(path: &str) -> Result<Resource, String> {
         stream: None,
         file: None,
         dir: None,
+        signalfd: None,
         cursor: 0,
     })
 }
@@ -1382,6 +1957,7 @@ fn open_sys(path: &str) -> Result<Resource, String> {
         stream: None,
         file: None,
         dir: None,
+        signalfd: None,
         cursor: 0,
     })
 }
